@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FlashBrand</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="preload" as="image" href="/board.webp" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="mark"></span>FlashBrand</div>
+      <div class="watching">
+        <span class="dot"></span><span id="stat-watching">0</span> currently watching
+      </div>
+      <div class="counts">
+        <span id="stat-available">0</span> free
+        <span class="sep"></span>
+        <span id="stat-live">0</span> live
+      </div>
+      <div class="dev">
+        <button type="button" data-action="sweep">Sweep</button>
+        <button type="button" data-action="reset">Reset</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="featured" id="featured"></aside>
+
+      <div class="viewport" id="viewport">
+        <canvas id="board"></canvas>
+      </div>
+    </main>
+
+    <div class="badge" id="badge" hidden></div>
+
+    <div class="card" id="card" hidden>
+      <div class="card-avatar" id="card-avatar"></div>
+      <div class="card-body">
+        <p class="card-name" id="card-name"></p>
+        <p class="card-handle" id="card-handle"></p>
+        <div class="card-links" id="card-links"></div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

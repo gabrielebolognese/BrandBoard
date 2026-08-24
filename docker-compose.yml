@@ -1,0 +1,22 @@
+# Local PostgreSQL for development and for the claim concurrency tests.
+#   docker compose up -d
+#   DATABASE_URL=postgres://flashbrand:flashbrand@localhost:5433/flashbrand_test npm test
+services:
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: flashbrand
+      POSTGRES_PASSWORD: flashbrand
+      POSTGRES_DB: flashbrand_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flashbrand -d flashbrand_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - flashbrand_pgdata:/var/lib/postgresql/data
+
+volumes:
+  flashbrand_pgdata:

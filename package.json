@@ -1,0 +1,35 @@
+{
+  "name": "flashbrand",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node scripts/with-postgres.mjs npx tsx src/dev-server.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:setup": "tsx src/db/setup.ts",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "test:db": "node scripts/with-postgres.mjs npx vitest run",
+    "serve": "tsx src/dev-server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "pg": "^8.23.0",
+    "sharp": "^0.35.3"
+  }
+}

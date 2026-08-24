@@ -1,0 +1,4 @@
+# The project standardises on LF; keep the repo that way regardless of platform.
+* text=auto eol=lf
+*.webp binary
+*.png binary

@@ -1,0 +1,212 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import type { Pool } from "pg";
+import { claimBlock } from "./board/claim.js";
+import { avatarPixelsFor, generateAvatar } from "./board/avatar.js";
+import { invalidateCompositeBoard } from "./board/composite.js";
+import { TileConflictError } from "./board/errors.js";
+import { BOARD_SIZE } from "./config.js";
+
+/**
+ * Fills the board with plausible fake listings so the rendering work has
+ * something to render. Blocks are claimed through the real claim transaction
+ * rather than inserted directly, so seeding cannot produce a board state the
+ * product could not reach on its own.
+ */
+
+const FIRST = [
+  "Ava", "Milo", "Nina", "Theo", "Iris", "Kai", "Luca", "Mara", "Otis", "Sena",
+  "Rui", "Ines", "Bex", "Dara", "Ezra", "Fumi", "Gia", "Hugo", "Ida", "Jax",
+  "Noor", "Omar", "Pia", "Quinn", "Remy", "Suki", "Tariq", "Uma", "Vero", "Wren",
+];
+
+const LAST = [
+  "Stone", "Vega", "Marsh", "Okoye", "Lindqvist", "Reyes", "Sato", "Fenn", "Duarte",
+  "Bishop", "Novak", "Rossi", "Adeyemi", "Kaur", "Beaumont", "Halvorsen", "Costa",
+  "Yilmaz", "Nakamura", "Ferreira",
+];
+
+const CATEGORIES = [
+  "Fitness", "Music", "Tech", "Art", "Gaming", "Food", "Finance", "Comedy", "Fashion",
+  "Travel", "Film", "Writing",
+];
+
+const PLATFORMS = ["x", "instagram", "youtube", "tiktok", "twitch", "newsletter"] as const;
+
+/** Deterministic PRNG so a reseed produces the same board. */
+function makeRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+export interface SeedResult {
+  readonly blocks: number;
+  readonly tiles: number;
+  readonly attempts: number;
+}
+
+export async function seedBoard(
+  pool: Pool,
+  avatarDir: URL,
+  target = 240,
+  seed = 20260824,
+): Promise<SeedResult> {
+  await mkdir(avatarDir, { recursive: true });
+  const random = makeRandom(seed);
+
+  const userId = await seedUser(pool, random);
+
+  let blocks = 0;
+  let tiles = 0;
+  let attempts = 0;
+  const usedHandles = new Set<string>();
+
+  while (blocks < target && attempts < target * 12) {
+    attempts += 1;
+
+    const size = pickSize(random);
+    // Biased toward the middle, the way a real board fills from its centre out.
+    const x = clampAnchor(gaussian(random, BOARD_SIZE / 2, BOARD_SIZE / 4.2), size);
+    const y = clampAnchor(gaussian(random, BOARD_SIZE / 2, BOARD_SIZE / 4.2), size);
+
+    const first = pick(random, FIRST);
+    const last = pick(random, LAST);
+    const handle = uniqueHandle(`${first}${last}`.toLowerCase(), usedHandles);
+
+    try {
+      const block = await claimBlock(pool, userId, { x, y, size });
+      const initials = `${first[0] ?? "?"}${last[0] ?? "?"}`;
+      const avatar = await generateAvatar(handle, initials, avatarPixelsFor(size));
+      await writeFile(new URL(`${block.id}.webp`, avatarDir), avatar);
+
+      await publish(pool, block.id, {
+        name: `${first} ${last}`,
+        handle,
+        imageUrl: `/avatars/${block.id}.webp`,
+        category: pick(random, CATEGORIES),
+        links: pickLinks(random, handle),
+      });
+
+      blocks += 1;
+      tiles += size * size;
+    } catch (error) {
+      // The square was taken. Pick another; that is all a conflict means here.
+      if (!(error instanceof TileConflictError)) throw error;
+      usedHandles.delete(handle);
+    }
+  }
+
+  invalidateCompositeBoard();
+  return { blocks, tiles, attempts };
+}
+
+interface Listing {
+  readonly name: string;
+  readonly handle: string;
+  readonly imageUrl: string;
+  readonly category: string;
+  readonly links: Record<string, string>;
+}
+
+/**
+ * Seeded blocks go straight to live. Real ones cannot: payment moves them to
+ * pending_review and an admin publishes them (invariant 4).
+ */
+async function publish(pool: Pool, blockId: string, listing: Listing): Promise<void> {
+  await pool.query(
+    `UPDATE blocks
+        SET status = 'live',
+            reserved_until = NULL,
+            published_at = now(),
+            display_name = $2,
+            handle = $3,
+            image_url = $4,
+            primary_url = $5,
+            category = $6,
+            links = $7::jsonb,
+            click_count = $8
+      WHERE id = $1`,
+    [
+      blockId,
+      listing.name,
+      listing.handle,
+      listing.imageUrl,
+      listing.links["x"] ?? `https://example.com/${listing.handle}`,
+      listing.category,
+      JSON.stringify(listing.links),
+      0,
+    ],
+  );
+}
+
+async function seedUser(pool: Pool, random: () => number): Promise<string> {
+  const suffix = Math.floor(random() * 1e6);
+  const result = await pool.query<{ id: string }>(
+    `INSERT INTO users (x_handle, x_user_id)
+     VALUES ($1, $2)
+     ON CONFLICT (x_user_id) DO UPDATE SET x_handle = EXCLUDED.x_handle
+     RETURNING id`,
+    ["seed", `seed-${suffix}`],
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new Error("could not create the seed user");
+  return row.id;
+}
+
+/**
+ * Mostly small, with the occasional large block, since there is no cap. The
+ * tail is what proves the board handles sizes beyond the old 5x5 limit.
+ */
+function pickSize(random: () => number): number {
+  const roll = random();
+  if (roll < 0.40) return 1;
+  if (roll < 0.64) return 2;
+  if (roll < 0.80) return 3;
+  if (roll < 0.90) return 4;
+  if (roll < 0.96) return 5;
+  return 6 + Math.floor(random() * 7); // 6 through 12
+}
+
+function pick<T>(random: () => number, values: readonly T[]): T {
+  const value = values[Math.floor(random() * values.length)];
+  if (value === undefined) throw new Error("empty pick list");
+  return value;
+}
+
+function pickLinks(random: () => number, handle: string): Record<string, string> {
+  const links: Record<string, string> = {};
+  const count = 1 + Math.floor(random() * 3);
+  const pool = [...PLATFORMS];
+  for (let i = 0; i < count && pool.length > 0; i += 1) {
+    const index = Math.floor(random() * pool.length);
+    const [platform] = pool.splice(index, 1);
+    if (platform === undefined) continue;
+    links[platform] = `https://${platform}.example/${handle}`;
+  }
+  return links;
+}
+
+function gaussian(random: () => number, mean: number, spread: number): number {
+  const u = Math.max(random(), 1e-9);
+  const v = random();
+  const normal = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  return mean + normal * spread;
+}
+
+function clampAnchor(value: number, size: number): number {
+  const max = BOARD_SIZE - size;
+  return Math.min(Math.max(Math.round(value), 0), max);
+}
+
+function uniqueHandle(base: string, used: Set<string>): string {
+  let handle = base;
+  let n = 2;
+  while (used.has(handle)) {
+    handle = `${base}${n}`;
+    n += 1;
+  }
+  used.add(handle);
+  return handle;
+}
