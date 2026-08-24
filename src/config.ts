@@ -9,13 +9,12 @@ export const BOARD_SIZE = 100;
 
 export const MIN_BLOCK_SIZE = 1;
 
-/**
- * There is no purchasable-size list and no maximum block size. A block may be
- * any N x N square, up to the whole board, and the only thing that can stop it
- * is a tile someone else already holds. The board's own edge is therefore the
- * only ceiling: a block is legal when x + size and y + size both fit.
+/*
+ * There is deliberately no MAX_BLOCK_SIZE. A block may be any N x N square, up
+ * to the whole board, and the only thing that can stop it is a tile someone
+ * else already holds. The board's edge is the only ceiling, enforced by
+ * isInBounds and by the blocks_within_board constraint.
  */
-export const MAX_BLOCK_SIZE = BOARD_SIZE;
 
 export const TILE_COUNT = BOARD_SIZE * BOARD_SIZE;
 
