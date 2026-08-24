@@ -5,8 +5,9 @@
 -- database enforces on its own. src/db/schema.test.ts asserts the two agree,
 -- so they cannot drift.
 --
--- There is no maximum block size. A block is any N x N square that fits inside
--- the board and does not overlap tiles someone already holds.
+-- A block is any N x N square from 1x1 up to max_block_size() that fits inside
+-- the board and does not overlap tiles someone already holds. The cap is an
+-- anti-monopoly rule: 25x25 is 625 tiles, 6.25% of the board.
 --
 -- Changing board_size() does NOT revalidate existing CHECK constraints.
 -- Resizing the board is a migration, not an edit to this file.
@@ -19,6 +20,9 @@ BEGIN;
 
 CREATE OR REPLACE FUNCTION board_size() RETURNS smallint
   LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 100::smallint $$;
+
+CREATE OR REPLACE FUNCTION max_block_size() RETURNS smallint
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 25::smallint $$;
 
 -- ---------------------------------------------------------------------------
 -- users
@@ -57,7 +61,7 @@ CREATE TABLE IF NOT EXISTS blocks (
 
   x                   smallint NOT NULL,   -- top-left tile, 0..board_size()-1
   y                   smallint NOT NULL,
-  size                smallint NOT NULL,   -- 1 upwards; only the board edge caps it
+  size                smallint NOT NULL,   -- 1..max_block_size()
 
   status              block_status NOT NULL DEFAULT 'reserved',
   reserved_until      timestamptz,
@@ -70,14 +74,20 @@ CREATE TABLE IF NOT EXISTS blocks (
   links               jsonb NOT NULL DEFAULT '{}'::jsonb,
   category            text,
 
+  -- Blocks are rented monthly, so a live block has a subscription behind it and
+  -- a period it is paid through. Both stay null until the payment provider says
+  -- otherwise; wiring them up is Paddle's job.
+  subscription_id     text UNIQUE,
+  current_period_end  timestamptz,
+
   click_count         integer NOT NULL DEFAULT 0,
   created_at          timestamptz NOT NULL DEFAULT now(),
   published_at        timestamptz,
 
-  -- No maximum block size: a block may be any N x N square that fits on the
-  -- board and does not collide. Overlap is refused by occupied_tiles, not here.
-  CONSTRAINT blocks_size_positive
-    CHECK (size >= 1),
+  -- Capped so no single buyer can corner the board. Overlap is still refused
+  -- by occupied_tiles rather than here.
+  CONSTRAINT blocks_size_range
+    CHECK (size BETWEEN 1 AND max_block_size()),
 
   -- A block is defined by its top-left tile, so the whole square must fit.
   -- This is what rejects (98, 98) at size 3.
@@ -177,13 +187,25 @@ CREATE INDEX IF NOT EXISTS click_events_block_day_idx ON click_events (block_id,
 -- CREATE TABLE IF NOT EXISTS leaves an existing table untouched, so anything
 -- that changes an existing constraint has to say so explicitly.
 
--- Block sizes were once capped at 5x5. They are not any more.
-ALTER TABLE blocks DROP CONSTRAINT IF EXISTS blocks_size_range;
-DROP FUNCTION IF EXISTS max_block_size();
+-- Block sizes: once capped at 5x5, then briefly uncapped, now capped at
+-- max_block_size(). Adding the constraint fails loudly if any existing block is
+-- already larger than the cap, which is the correct outcome: that is data the
+-- new rule forbids and it needs a decision, not a silent pass.
+ALTER TABLE blocks DROP CONSTRAINT IF EXISTS blocks_size_positive;
 
 DO $$ BEGIN
-  ALTER TABLE blocks ADD CONSTRAINT blocks_size_positive CHECK (size >= 1);
+  ALTER TABLE blocks ADD CONSTRAINT blocks_size_range
+    CHECK (size BETWEEN 1 AND max_block_size());
 EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Monthly billing arrived after the first schema.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS subscription_id text;
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS current_period_end timestamptz;
+
+DO $$ BEGIN
+  ALTER TABLE blocks ADD CONSTRAINT blocks_subscription_id_key UNIQUE (subscription_id);
+EXCEPTION WHEN duplicate_table THEN NULL; WHEN duplicate_object THEN NULL;
 END $$;
 
 COMMIT;

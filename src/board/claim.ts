@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { RESERVATION_TTL_MINUTES } from "../config.js";
+import { MAX_BLOCK_SIZE, RESERVATION_TTL_MINUTES } from "../config.js";
 import { isTileCollision, tileFromErrorDetail, withTransaction } from "../db/client.js";
 import type { Queryable } from "../db/client.js";
 import { releaseExpiredReservations } from "./cleanup.js";
@@ -24,6 +24,8 @@ export interface ClaimedBlock {
 export interface ClaimOptions {
   /** Overridable so tests can reserve in the past. Production uses the default. */
   readonly reservationMinutes?: number;
+  /** Stamped on every block in the claim, tying a cart to one payment. */
+  readonly checkoutSessionId?: string;
 }
 
 /**
@@ -55,12 +57,19 @@ export async function claimBlocks(
   validateClaim(placements);
 
   const reservationMinutes = options.reservationMinutes ?? RESERVATION_TTL_MINUTES;
+  const checkoutSessionId = options.checkoutSessionId ?? null;
   const requestedTiles = sortTiles(placements.flatMap((placement) => tilesForBlock(placement)));
 
   try {
     return await withTransaction(pool, async (tx) => {
       await releaseExpiredReservations(tx);
-      const blocks = await insertReservedBlocks(tx, userId, placements, reservationMinutes);
+      const blocks = await insertReservedBlocks(
+        tx,
+        userId,
+        placements,
+        reservationMinutes,
+        checkoutSessionId,
+      );
       await occupyTiles(tx, blocks);
       return blocks;
     });
@@ -98,7 +107,7 @@ function validateClaim(placements: readonly Placement[]): void {
   if (placements.length === 0) throw new EmptyClaimError();
 
   for (const placement of placements) {
-    if (!isValidSize(placement.size)) throw new InvalidSizeError(placement.size);
+    if (!isValidSize(placement.size)) throw new InvalidSizeError(placement.size, MAX_BLOCK_SIZE);
     if (!isInBounds(placement)) {
       throw new OutOfBoundsError(placement.x, placement.y, placement.size);
     }
@@ -128,6 +137,7 @@ async function insertReservedBlocks(
   userId: string,
   placements: readonly Placement[],
   reservationMinutes: number,
+  checkoutSessionId: string | null,
 ): Promise<ClaimedBlock[]> {
   const result = await tx.query<{
     id: string;
@@ -136,8 +146,9 @@ async function insertReservedBlocks(
     size: number;
     reserved_until: Date;
   }>(
-    `INSERT INTO blocks (user_id, x, y, size, status, reserved_until)
-     SELECT $1::uuid, p.x, p.y, p.size, 'reserved', now() + make_interval(mins => $5::int)
+    `INSERT INTO blocks (user_id, x, y, size, status, reserved_until, checkout_session_id)
+     SELECT $1::uuid, p.x, p.y, p.size, 'reserved',
+            now() + make_interval(mins => $5::int), $6::text
        FROM unnest($2::smallint[], $3::smallint[], $4::smallint[]) AS p(x, y, size)
      RETURNING id, x, y, size, reserved_until`,
     [
@@ -146,6 +157,7 @@ async function insertReservedBlocks(
       placements.map((p) => p.y),
       placements.map((p) => p.size),
       reservationMinutes,
+      checkoutSessionId,
     ],
   );
 

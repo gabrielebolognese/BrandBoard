@@ -9,12 +9,13 @@ export const BOARD_SIZE = 100;
 
 export const MIN_BLOCK_SIZE = 1;
 
-/*
- * There is deliberately no MAX_BLOCK_SIZE. A block may be any N x N square, up
- * to the whole board, and the only thing that can stop it is a tile someone
- * else already holds. The board's edge is the only ceiling, enforced by
- * isInBounds and by the blocks_within_board constraint.
+/**
+ * Largest square anyone may buy, in tiles. A 25x25 is 625 tiles, 6.25% of the
+ * board; the cap exists so no single buyer can corner the board. Below it, a
+ * block may sit at any free (x, y) and the only other rule is that it cannot
+ * overlap tiles someone already holds.
  */
+export const MAX_BLOCK_SIZE = 25;
 
 export const TILE_COUNT = BOARD_SIZE * BOARD_SIZE;
 
@@ -35,26 +36,30 @@ export const TILE_INSET = 2;
 /** Side of the square actually drawn for a single tile: 24 - 2 - 2 = 20px. */
 export const TILE_SQUARE = TILE_PIXELS - 2 * TILE_INSET;
 
+/** Blocks are rented, not bought outright: the rate is per tile per month. */
+export const BILLING_PERIOD = "month" as const;
+
 /**
- * Flat rate per tile, in minor currency units. Deliberately has no default:
- * the price is a business decision that has not been made yet, and a silent
- * fallback would ship the wrong number to a real checkout.
+ * Flat rate per tile per month, in minor currency units. Deliberately has no
+ * default: the price is a business decision that has not been made yet, and a
+ * silent fallback would ship the wrong number to a real checkout.
  */
-export function pricePerTileCents(): number {
-  const raw = process.env["PRICE_PER_TILE_CENTS"];
+export function pricePerTileCentsPerMonth(): number {
+  const raw = process.env["PRICE_PER_TILE_CENTS_PER_MONTH"];
   const value = Number(raw);
   if (raw === undefined || raw === "" || !Number.isInteger(value) || value <= 0) {
     throw new Error(
-      "PRICE_PER_TILE_CENTS must be set to a positive integer number of cents per tile.",
+      "PRICE_PER_TILE_CENTS_PER_MONTH must be set to a positive integer number of " +
+        "cents, charged per tile per month.",
     );
   }
   return value;
 }
 
 /**
- * The only place a checkout price may come from. Derived from size on the
- * server; a price supplied by the client is never read.
+ * The recurring monthly charge for one block. The only place a checkout price
+ * may come from: derived from size on the server, never read from the client.
  */
-export function priceForSizeCents(size: number): number {
-  return size * size * pricePerTileCents();
+export function monthlyPriceCents(size: number): number {
+  return size * size * pricePerTileCentsPerMonth();
 }

@@ -1,4 +1,4 @@
-import { BOARD_SIZE, MIN_BLOCK_SIZE } from "../config.js";
+import { BOARD_SIZE, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE } from "../config.js";
 
 export interface Tile {
   readonly x: number;
@@ -12,11 +12,11 @@ export interface Placement {
 }
 
 /**
- * Any whole number of tiles from 1 up. The upper bound is the board, not a
- * price tier, and isInBounds is what actually enforces it.
+ * Any whole number of tiles from 1 to MAX_BLOCK_SIZE. There are no fixed price
+ * tiers; the cap is an anti-monopoly rule, not a product list.
  */
 export function isValidSize(size: number): boolean {
-  return Number.isInteger(size) && size >= MIN_BLOCK_SIZE && size <= BOARD_SIZE;
+  return Number.isInteger(size) && size >= MIN_BLOCK_SIZE && size <= MAX_BLOCK_SIZE;
 }
 
 /**

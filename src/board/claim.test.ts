@@ -10,9 +10,10 @@ import {
   statusOf,
   tilesOf,
 } from "../test/db.js";
+import { MAX_BLOCK_SIZE } from "../config.js";
 import { runReservationSweep } from "./cleanup.js";
 import { claimBlock, claimBlocks } from "./claim.js";
-import { OutOfBoundsError, TileConflictError } from "./errors.js";
+import { InvalidSizeError, OutOfBoundsError, TileConflictError } from "./errors.js";
 
 // Skipped, loudly, when DATABASE_URL is unset: these assertions are about what
 // PostgreSQL does under concurrency, and there is nothing to assert without it.
@@ -57,24 +58,30 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
     });
   });
 
-  describe("blocks larger than the old 5x5 cap", () => {
+  describe("large blocks, up to the cap", () => {
     it("claims a 12x12 and holds all 144 tiles", async () => {
       const block = await claimBlock(pool, alice, { x: 20, y: 20, size: 12 });
       expect(await tilesOf(pool, block.id)).toHaveLength(144);
       expect(await countTiles(pool)).toBe(144);
     });
 
-    it("claims the entire board as one block when nothing is in the way", async () => {
-      const block = await claimBlock(pool, alice, { x: 0, y: 0, size: 100 });
-      expect(await tilesOf(pool, block.id)).toHaveLength(10_000);
+    it("claims a block at the cap and holds all 625 tiles", async () => {
+      const block = await claimBlock(pool, alice, { x: 10, y: 10, size: MAX_BLOCK_SIZE });
+      expect(await tilesOf(pool, block.id)).toHaveLength(625);
+    });
+
+    it("refuses anything past the cap, so no one can corner the board", async () => {
+      await expect(
+        claimBlock(pool, alice, { x: 0, y: 0, size: MAX_BLOCK_SIZE + 1 }),
+      ).rejects.toBeInstanceOf(InvalidSizeError);
+      expect(await countTiles(pool)).toBe(0);
     });
 
     it("still cannot overlap, however large it is", async () => {
       await claimBlock(pool, alice, { x: 50, y: 50, size: 1 });
 
-      // A 30x30 covering that single tile loses to it, because overlap is the
-      // only rule that remains.
-      await expect(claimBlock(pool, bob, { x: 40, y: 40, size: 30 })).rejects.toBeInstanceOf(
+      // A 20x20 covering that single tile loses to it: size buys nothing.
+      await expect(claimBlock(pool, bob, { x: 40, y: 40, size: 20 })).rejects.toBeInstanceOf(
         TileConflictError,
       );
       expect(await countTiles(pool)).toBe(1);
@@ -82,8 +89,8 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
 
     it("lets a big block fill the gap around what is already held", async () => {
       await claimBlock(pool, alice, { x: 0, y: 0, size: 1 });
-      const big = await claimBlock(pool, bob, { x: 1, y: 1, size: 30 });
-      expect(await tilesOf(pool, big.id)).toHaveLength(900);
+      const big = await claimBlock(pool, bob, { x: 1, y: 1, size: 20 });
+      expect(await tilesOf(pool, big.id)).toHaveLength(400);
     });
   });
 

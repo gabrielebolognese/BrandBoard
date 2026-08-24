@@ -11,8 +11,11 @@ export class InvalidSizeError extends ClaimError {
   readonly code = "invalid_size";
   readonly status = 400;
 
-  constructor(readonly size: number) {
-    super(`Block size ${size} is not purchasable.`);
+  constructor(
+    readonly size: number,
+    readonly maxSize: number,
+  ) {
+    super(`Block size ${size} is not available. Blocks run from 1x1 to ${maxSize}x${maxSize}.`);
     this.name = "InvalidSizeError";
   }
 }

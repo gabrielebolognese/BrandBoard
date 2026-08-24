@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { BOARD_SIZE } from "../config.js";
+import { BOARD_SIZE, MAX_BLOCK_SIZE } from "../config.js";
 import { createTestUser, hasDatabase, resetBoard, setupTestDatabase } from "../test/db.js";
 
 const suite = describe.skipIf(!hasDatabase);
@@ -27,8 +27,10 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
     // once for constraints the database enforces alone. This is the guard that
     // stops the two copies from drifting.
     it("agrees with src/config.ts", async () => {
-      const result = await pool.query<{ board: number }>(`SELECT board_size() AS board`);
-      expect(result.rows[0]).toEqual({ board: BOARD_SIZE });
+      const result = await pool.query<{ board: number; max_block: number }>(
+        `SELECT board_size() AS board, max_block_size() AS max_block`,
+      );
+      expect(result.rows[0]).toEqual({ board: BOARD_SIZE, max_block: MAX_BLOCK_SIZE });
     });
   });
 
@@ -68,16 +70,18 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
   describe("blocks", () => {
     it("refuses a size below one", async () => {
       await expect(reserve(pool, alice, 0, 0, 0)).rejects.toMatchObject({
-        constraint: "blocks_size_positive",
+        constraint: "blocks_size_range",
       });
     });
 
-    it("imposes no maximum size beyond the board itself", async () => {
-      // Far past the old 5x5 cap, and legal because it fits and collides with
-      // nothing. The whole board as a single block is legal too.
-      await expect(reserve(pool, alice, 10, 10, 40)).resolves.toBeDefined();
-      await pool.query(`TRUNCATE occupied_tiles, blocks CASCADE`);
-      await expect(reserve(pool, alice, 0, 0, BOARD_SIZE)).resolves.toBeDefined();
+    it("refuses a block larger than the cap, even where it would fit", async () => {
+      await expect(reserve(pool, alice, 0, 0, MAX_BLOCK_SIZE + 1)).rejects.toMatchObject({
+        constraint: "blocks_size_range",
+      });
+    });
+
+    it("accepts a block right at the cap", async () => {
+      await expect(reserve(pool, alice, 10, 10, MAX_BLOCK_SIZE)).resolves.toBeDefined();
     });
 
     it("still refuses a block that runs off the edge, at any size", async () => {

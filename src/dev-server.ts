@@ -7,10 +7,21 @@ import { claimBlocks } from "./board/claim.js";
 import { runReservationSweep } from "./board/cleanup.js";
 import { getCompositeBoard, invalidateCompositeBoard, localAvatarStore } from "./board/composite.js";
 import { ClaimError, TileConflictError } from "./board/errors.js";
+import { isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
+import { createCheckout, readCheckout } from "./board/checkout.js";
 import { availabilityBitmap, buildManifest, heldTileCount } from "./board/manifest.js";
 import { currentlyWatching, startWatchingTicker } from "./board/watching.js";
-import { BOARD_SIZE, TILE_COUNT, TILE_INSET, TILE_PIXELS, priceForSizeCents } from "./config.js";
+import {
+  BILLING_PERIOD,
+  BOARD_SIZE,
+  MAX_BLOCK_SIZE,
+  TILE_COUNT,
+  TILE_INSET,
+  TILE_PIXELS,
+  monthlyPriceCents,
+  pricePerTileCentsPerMonth,
+} from "./config.js";
 import { createPool } from "./db/client.js";
 import { seedBoard } from "./seed.js";
 
@@ -24,8 +35,11 @@ const PUBLIC_DIR = new URL("../public/", import.meta.url);
 const AVATAR_DIR = new URL("../var/avatars/", import.meta.url);
 const SCHEMA_FILE = new URL("../db/schema.sql", import.meta.url);
 
-/** Until a real price is chosen, the UI shows this and says it is a placeholder. */
-const PLACEHOLDER_PRICE_CENTS = 200;
+/**
+ * Until a real price is chosen, the UI shows this and says it is a placeholder.
+ * Cents per tile per month.
+ */
+const PLACEHOLDER_RATE_CENTS = 200;
 
 const url = process.env["DATABASE_URL"];
 if (url === undefined || url === "") {
@@ -102,14 +116,29 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const block = /^\/api\/block\/([0-9a-f-]{36})$/.exec(path);
     if (block?.[1] !== undefined) return sendBlockDetail(res, block[1]);
 
+    const session = /^\/api\/checkout\/(chk_[0-9a-f-]{36})$/.exec(path);
+    if (session?.[1] !== undefined) {
+      return sendJson(res, 200, { id: session[1], blocks: await readCheckout(pool, session[1]) });
+    }
+
     if (path === "/api/quote") {
       const size = Number(requestUrl.searchParams.get("size") ?? "1");
+      // Refuse to price something nobody can buy: a quote for a 26x26 would be
+      // a number the checkout could never honour.
+      if (!isValidSize(size)) {
+        return sendJson(res, 400, {
+          error: "invalid_size",
+          message: `Blocks run from 1x1 to ${MAX_BLOCK_SIZE}x${MAX_BLOCK_SIZE}.`,
+          maxBlockSize: MAX_BLOCK_SIZE,
+        });
+      }
       return sendJson(res, 200, quote(size));
     }
   }
 
   if (method === "POST") {
     if (path === "/api/claim") return claim(req, res);
+    if (path === "/api/checkout") return checkout(req, res);
     if (path === "/api/sweep") return sendJson(res, 200, await runReservationSweep(pool));
     if (path === "/api/reset") {
       if (!resettable) return sendJson(res, 403, { error: "not_a_dev_database", databaseName });
@@ -210,10 +239,12 @@ async function stats(pool: Pool): Promise<unknown> {
     tilePixels: TILE_PIXELS,
     tileInset: TILE_INSET,
     boardSize: BOARD_SIZE,
+    maxBlockSize: MAX_BLOCK_SIZE,
     // For displaying a running total while a block is being dragged. The price
-    // that is charged is still computed server side at checkout, never sent up.
-    pricePerTileCents: tileRate().cents,
+    // actually charged is still computed server side at checkout, never sent up.
+    pricePerTileCentsPerMonth: tileRate().cents,
     priceIsPlaceholder: tileRate().placeholder,
+    billingPeriod: BILLING_PERIOD,
   };
 }
 
@@ -235,26 +266,73 @@ async function boardState(pool: Pool): Promise<unknown> {
 // Claiming
 // ---------------------------------------------------------------------------
 
-/** The per-tile rate, falling back to the dev placeholder when none is set. */
+/**
+ * The per-tile monthly rate, falling back to the dev placeholder when none is
+ * set. config.ts still refuses to invent a price; the fallback lives here, in
+ * the dev harness, and every response says which one it used.
+ */
 function tileRate(): { cents: number; placeholder: boolean } {
   try {
-    return { cents: priceForSizeCents(1), placeholder: false };
+    return { cents: pricePerTileCentsPerMonth(), placeholder: false };
   } catch {
-    return { cents: PLACEHOLDER_PRICE_CENTS, placeholder: true };
+    return { cents: PLACEHOLDER_RATE_CENTS, placeholder: true };
   }
 }
 
 function quote(size: number): unknown {
   try {
-    return { size, tiles: size * size, cents: priceForSizeCents(size), placeholder: false };
+    return {
+      size,
+      tiles: size * size,
+      monthlyCents: monthlyPriceCents(size),
+      billingPeriod: BILLING_PERIOD,
+      placeholder: false,
+    };
   } catch {
     return {
       size,
       tiles: size * size,
-      cents: size * size * PLACEHOLDER_PRICE_CENTS,
+      monthlyCents: size * size * PLACEHOLDER_RATE_CENTS,
+      billingPeriod: BILLING_PERIOD,
       placeholder: true,
-      note: "PRICE_PER_TILE_CENTS is unset; this is a dev placeholder.",
+      note: "PRICE_PER_TILE_CENTS_PER_MONTH is unset; this is a dev placeholder.",
     };
+  }
+}
+
+/**
+ * Cart to checkout. Reserves every square in one transaction, then prices what
+ * it managed to hold. Returns 409 with the offending tiles if any square in the
+ * cart was taken, and nothing is reserved in that case.
+ */
+async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let placements: Placement[];
+  try {
+    const body = (await readJson(req)) as { placements?: unknown };
+    placements = parsePlacements(body.placements);
+  } catch (error) {
+    return sendJson(res, 400, { error: "bad_request", detail: String(error) });
+  }
+
+  const rate = tileRate();
+  try {
+    const session = await createCheckout(pool, devUserId, placements, rate.cents, {
+      rateIsPlaceholder: rate.placeholder,
+    });
+    return sendJson(res, 201, session);
+  } catch (error) {
+    if (error instanceof TileConflictError) {
+      return sendJson(res, error.status, {
+        error: error.code,
+        message: error.message,
+        conflictCount: error.conflictCount,
+        conflicts: error.conflicts,
+      });
+    }
+    if (error instanceof ClaimError) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
   }
 }
 

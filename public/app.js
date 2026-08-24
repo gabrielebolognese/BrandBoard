@@ -47,8 +47,16 @@ let selection = null;
 let flashes = [];
 let dirty = true;
 
-let pricePerTileCents = 0;
+let rateCentsPerMonth = 0;
 let priceIsPlaceholder = false;
+let maxBlockSize = 25;
+
+/** Squares chosen but not yet reserved. One checkout can cover several. */
+let cart = [];
+/** Set once the cart has been reserved and priced by the server. */
+let checkoutSession = null;
+let holdTimer = 0;
+
 const detailCache = new Map();
 let featuredBlocks = [];
 let toastTimer = 0;
@@ -62,8 +70,9 @@ async function loadStats() {
   TILE = stats.tilePixels;
   INSET = stats.tileInset;
   PX = BOARD * TILE;
-  pricePerTileCents = stats.pricePerTileCents;
+  rateCentsPerMonth = stats.pricePerTileCentsPerMonth;
   priceIsPlaceholder = stats.priceIsPlaceholder;
+  maxBlockSize = stats.maxBlockSize;
   document.getElementById("stat-available").textContent = stats.tilesAvailable.toLocaleString();
   document.getElementById("stat-live").textContent = stats.blocksLive.toLocaleString();
   document.getElementById("stat-watching").textContent = stats.watching.toLocaleString();
@@ -212,7 +221,23 @@ function isFree(square) {
       if (held[(square.y + dy) * BOARD + (square.x + dx)] === 1) return false;
     }
   }
-  return true;
+  return !overlapsCart(square);
+}
+
+/** A square already in the cart is spoken for, even though nobody holds it yet. */
+function overlapsCart(square, ignore = -1) {
+  return cart.some(
+    (item, i) =>
+      i !== ignore &&
+      square.x < item.x + item.size &&
+      item.x < square.x + square.size &&
+      square.y < item.y + item.size &&
+      item.y < square.y + square.size,
+  );
+}
+
+function money(cents) {
+  return (cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" });
 }
 
 /** The square currently under the cursor: dragged size, or 1x1 when hovering. */
@@ -255,6 +280,11 @@ function draw() {
     const free = isFree(square);
     fill(square, free ? "rgba(74,222,128,0.22)" : "rgba(242,84,91,0.22)");
     outline(square, free ? "#4ade80" : "#f2545b", 2);
+  }
+
+  for (const item of cart) {
+    fill(item, "rgba(96,165,250,0.24)");
+    outline(item, "#60a5fa", 2);
   }
 
   drawFlashes();
@@ -322,15 +352,16 @@ function showBadge(square, clientX, clientY) {
   // Display only, and it works for any size because it is derived from the
   // per-tile rate rather than a fixed list of purchasable sizes.
   const tiles = square.size * square.size;
-  const amount = ((tiles * pricePerTileCents) / 100).toLocaleString(undefined, {
+  const amount = ((tiles * rateCentsPerMonth) / 100).toLocaleString(undefined, {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
   });
 
+  const capped = square.size >= maxBlockSize ? " &middot; max" : "";
   badge.innerHTML =
-    `${square.size}x${square.size} <small>${tiles} tiles` +
-    ` &middot; ${amount}${priceIsPlaceholder ? "*" : ""}</small>`;
+    `${square.size}x${square.size} <small>${amount}/mo` +
+    `${priceIsPlaceholder ? "*" : ""}${capped}</small>`;
   badge.className = free ? "badge" : "badge blocked";
   badge.hidden = false;
   badge.style.left = `${Math.min(clientX + 16, window.innerWidth - 120)}px`;
@@ -495,10 +526,11 @@ canvas.addEventListener("pointerup", (event) => {
   dirty = true;
 
   if (!isFree(square)) {
-    toast("That square is already taken.", "bad");
+    const why = overlapsCart(square) ? "already in your cart" : "already taken";
+    toast("That square is " + why + ".", "bad");
     return;
   }
-  void claim(square);
+  addToCart(square);
 });
 
 canvas.addEventListener("pointerleave", () => {
@@ -510,14 +542,13 @@ canvas.addEventListener("pointerleave", () => {
 });
 
 /**
- * Drag distance picks the size. There is no maximum: the square grows until it
- * runs out of board, and whether it is claimable is decided by what is already
- * held, not by how big it is.
+ * Drag distance picks the size, up to the anti-monopoly cap, and the square
+ * stays on the board.
  */
 function squareFromDrag(anchor, current) {
   const dx = current.x - anchor.x;
   const dy = current.y - anchor.y;
-  const size = Math.min(BOARD, Math.max(Math.abs(dx), Math.abs(dy)) + 1);
+  const size = Math.min(maxBlockSize, Math.max(Math.abs(dx), Math.abs(dy)) + 1);
   let x = dx < 0 ? anchor.x - (size - 1) : anchor.x;
   let y = dy < 0 ? anchor.y - (size - 1) : anchor.y;
   x = Math.min(Math.max(x, 0), BOARD - size);
@@ -553,40 +584,266 @@ canvas.addEventListener(
 // Claiming
 // ---------------------------------------------------------------------------
 
-async function claim(square) {
+function addToCart(square) {
+  cart.push(square);
+  checkoutSession = null;
+  renderTerminal();
+  dirty = true;
+}
+
+function removeFromCart(index) {
+  cart.splice(index, 1);
+  renderTerminal();
+  dirty = true;
+}
+
+function clearCart() {
+  cart = [];
+  checkoutSession = null;
+  window.clearInterval(holdTimer);
+  renderTerminal();
+  dirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// The buying terminal
+// ---------------------------------------------------------------------------
+
+const terminal = document.getElementById("terminal");
+const terminalTitle = document.getElementById("terminal-title");
+const terminalBody = document.getElementById("terminal-body");
+const terminalFoot = document.getElementById("terminal-foot");
+
+document.getElementById("terminal-close").addEventListener("click", () => {
+  // In checkout the blocks are already reserved, so closing only hides the
+  // panel. In cart mode nothing is held yet, so closing discards it.
+  if (checkoutSession !== null) {
+    checkoutSession = null;
+    window.clearInterval(holdTimer);
+    renderTerminal();
+    return;
+  }
+  clearCart();
+});
+
+function renderTerminal() {
+  if (checkoutSession !== null) {
+    renderCheckout();
+    return;
+  }
+  if (cart.length === 0) {
+    terminal.hidden = true;
+    return;
+  }
+
+  terminal.hidden = false;
+  terminalTitle.textContent = "Your blocks (" + cart.length + ")";
+  terminalBody.textContent = "";
+
+  cart.forEach((item, index) => {
+    const monthly = item.size * item.size * rateCentsPerMonth;
+    terminalBody.append(
+      lineRow({
+        size: item.size,
+        title: item.size + "x" + item.size + " block",
+        sub: "(" + item.x + ", " + item.y + ") &middot; " + item.size * item.size + " tiles",
+        price: money(monthly) + "/mo",
+        onRemove: () => removeFromCart(index),
+      }),
+    );
+  });
+
+  const total = cart.reduce((sum, i) => sum + i.size * i.size * rateCentsPerMonth, 0);
+  const tiles = cart.reduce((sum, i) => sum + i.size * i.size, 0);
+
+  terminalFoot.textContent = "";
+  terminalFoot.append(totalRow("Total", total));
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "buy";
+  button.textContent = "Reserve and continue";
+  button.addEventListener("click", () => {
+    void startCheckout(button);
+  });
+  terminalFoot.append(button);
+
+  const note = document.createElement("p");
+  note.className = "note";
+  note.innerHTML =
+    tiles + " tile" + (tiles === 1 ? "" : "s") + " billed monthly. Reserving holds them " +
+    "for 15 minutes while you pay." +
+    (priceIsPlaceholder ? " <strong>Placeholder price.</strong>" : "");
+  terminalFoot.append(note);
+}
+
+/**
+ * Reserve the whole cart in one transaction, then show what the server priced.
+ * From here on the total shown is the server's, not the one added up in the
+ * page: the client never decides what anything costs.
+ */
+async function startCheckout(button) {
+  button.disabled = true;
+  button.textContent = "Reserving...";
+
   let response;
   try {
-    response = await fetch("/api/claim", {
+    response = await fetch("/api/checkout", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ placements: [{ x: square.x, y: square.y, size: square.size }] }),
+      body: JSON.stringify({ placements: cart }),
     });
   } catch {
     toast("Could not reach the server.", "bad");
+    button.disabled = false;
+    button.textContent = "Reserve and continue";
     return;
   }
 
   const body = await response.json();
 
   if (response.status === 201) {
-    flashes.push({ ...square, kind: "ok", born: performance.now() });
-    toast(`Reserved ${square.size}x${square.size} at (${square.x}, ${square.y}), held 15 minutes.`, "ok");
+    checkoutSession = body;
+    cart = [];
     await Promise.all([loadAvailability(), loadStats()]);
+    renderCheckout();
+    dirty = true;
     return;
   }
 
-  // The server is the authority on what is free (invariant 3). The optimistic
-  // bitmap said this square was open; it was not, so flash what actually lost.
+  // The optimistic bitmap said those squares were free; the server is the
+  // authority and it disagreed. Nothing was reserved.
   if (response.status === 409) {
     for (const tile of body.conflicts ?? []) {
       flashes.push({ x: tile.x, y: tile.y, size: 1, kind: "bad", born: performance.now() });
     }
-    toast(body.message ?? "Someone claimed that square first.", "bad");
+    toast(body.message ?? "Someone claimed one of those squares first.", "bad");
     await loadAvailability();
-    return;
+  } else {
+    toast(body.message ?? "That checkout was rejected.", "bad");
   }
 
-  toast(body.message ?? "That claim was rejected.", "bad");
+  button.disabled = false;
+  button.textContent = "Reserve and continue";
+  dirty = true;
+}
+
+function renderCheckout() {
+  const session = checkoutSession;
+  terminal.hidden = false;
+  terminalTitle.textContent = "Checkout";
+  terminalBody.textContent = "";
+
+  for (const line of session.lines) {
+    terminalBody.append(
+      lineRow({
+        size: line.size,
+        title: line.size + "x" + line.size + " block",
+        sub: "(" + line.x + ", " + line.y + ") &middot; " + line.tiles + " tiles",
+        price: money(line.monthlyCents) + "/mo",
+      }),
+    );
+  }
+
+  terminalFoot.textContent = "";
+
+  const hold = document.createElement("p");
+  hold.className = "hold";
+  terminalFoot.append(hold);
+  terminalFoot.append(totalRow("Total", session.monthlyTotalCents));
+
+  const pay = document.createElement("button");
+  pay.type = "button";
+  pay.className = "buy";
+  pay.disabled = !session.ready;
+  pay.textContent = session.ready ? "Pay with Paddle" : "Paddle not connected yet";
+  terminalFoot.append(pay);
+
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "buy secondary";
+  back.textContent = "Done";
+  back.addEventListener("click", () => {
+    checkoutSession = null;
+    window.clearInterval(holdTimer);
+    renderTerminal();
+  });
+  terminalFoot.append(back);
+
+  const note = document.createElement("p");
+  note.className = "note";
+  note.innerHTML =
+    "Checkout " + session.id.slice(0, 12) + "... &middot; " +
+    money(session.rateCentsPerTilePerMonth) + " per tile per month." +
+    (session.rateIsPlaceholder ? " <strong>Placeholder price.</strong>" : "") +
+    " Tiles stay held until payment; if the hold lapses they go back on sale.";
+  terminalFoot.append(note);
+
+  window.clearInterval(holdTimer);
+  const tick = () => {
+    const left = new Date(session.expiresAt).getTime() - Date.now();
+    if (left <= 0) {
+      hold.innerHTML = "<b>Hold expired.</b> Those tiles are back on sale.";
+      window.clearInterval(holdTimer);
+      void loadAvailability();
+      return;
+    }
+    const m = Math.floor(left / 60000);
+    const sec = Math.floor((left % 60000) / 1000);
+    hold.innerHTML = "Tiles held for <b>" + m + ":" + String(sec).padStart(2, "0") + "</b>";
+  };
+  tick();
+  holdTimer = window.setInterval(tick, 1000);
+}
+
+function lineRow(spec) {
+  const row = document.createElement("div");
+  row.className = "line";
+
+  const swatch = document.createElement("div");
+  swatch.className = "line-swatch";
+  swatch.textContent = spec.size + "x" + spec.size;
+  row.append(swatch);
+
+  const main = document.createElement("div");
+  main.className = "line-main";
+  const title = document.createElement("div");
+  title.className = "line-title";
+  title.textContent = spec.title;
+  const sub = document.createElement("div");
+  sub.className = "line-sub";
+  sub.innerHTML = spec.sub;
+  main.append(title, sub);
+  row.append(main);
+
+  const price = document.createElement("div");
+  price.className = "line-price";
+  price.textContent = spec.price;
+  row.append(price);
+
+  if (spec.onRemove !== undefined) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "line-remove";
+    remove.setAttribute("aria-label", "Remove");
+    remove.innerHTML = "&times;";
+    remove.addEventListener("click", spec.onRemove);
+    row.append(remove);
+  }
+  return row;
+}
+
+function totalRow(label, cents) {
+  const wrap = document.createElement("div");
+  wrap.className = "total";
+  const l = document.createElement("span");
+  l.className = "total-label";
+  l.textContent = label;
+  const v = document.createElement("span");
+  v.className = "total-value";
+  v.innerHTML = money(cents) + "<small>/mo</small>";
+  wrap.append(l, v);
+  return wrap;
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +866,7 @@ document.querySelector(".dev").addEventListener("click", async (event) => {
 
   if (action === "reset") {
     await fetch("/api/reset", { method: "POST" });
+    clearCart();
     toast("Board emptied. Restart the server to reseed.", "ok");
     await Promise.all([loadManifest(), loadAvailability(), loadStats(), loadComposite()]);
     await loadFeatured();

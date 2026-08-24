@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BOARD_SIZE } from "../config.js";
+import { BOARD_SIZE, MAX_BLOCK_SIZE } from "../config.js";
 import { isInBounds, isValidSize, placementsOverlap, tilesForBlock } from "./geometry.js";
 
 describe("bounds", () => {
@@ -21,13 +21,21 @@ describe("bounds", () => {
     expect(isInBounds({ x: 1.5, y: 0, size: 1 })).toBe(false);
   });
 
-  it("accepts any whole size from 1 up to the whole board", () => {
-    expect([0, 2.5, -1, BOARD_SIZE + 1].every((size) => !isValidSize(size))).toBe(true);
-    expect([1, 2, 5, 6, 17, 40, BOARD_SIZE].every(isValidSize)).toBe(true);
+  it("accepts any whole size from 1x1 up to the cap", () => {
+    expect([0, 2.5, -1, MAX_BLOCK_SIZE + 1, BOARD_SIZE].every((size) => !isValidSize(size))).toBe(
+      true,
+    );
+    expect([1, 2, 5, 6, 17, MAX_BLOCK_SIZE].every(isValidSize)).toBe(true);
   });
 
-  it("has no maximum block size: only the board edge stops a square", () => {
-    expect(isInBounds({ x: 0, y: 0, size: BOARD_SIZE })).toBe(true);
+  it("caps blocks at 25x25 so nobody can corner the board", () => {
+    expect(MAX_BLOCK_SIZE).toBe(25);
+    // 625 tiles, 6.25% of the board.
+    expect(MAX_BLOCK_SIZE * MAX_BLOCK_SIZE).toBe(625);
+    expect(isValidSize(26)).toBe(false);
+  });
+
+  it("still requires a legal square to fit inside the board", () => {
     expect(isInBounds({ x: 40, y: 40, size: 20 })).toBe(true);
     expect(isInBounds({ x: 90, y: 0, size: 11 })).toBe(false);
   });
