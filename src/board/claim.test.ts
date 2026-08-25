@@ -17,6 +17,7 @@ import {
   InvalidSizeError,
   OutOfBoundsError,
   OutsideUniverseError,
+  SizeNotAllowedHereError,
   TileConflictError,
 } from "./errors.js";
 
@@ -65,14 +66,24 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
 
   describe("large blocks, up to the cap", () => {
     it("claims a 12x12 and holds all 144 tiles", async () => {
-      const block = await claimBlock(pool, alice, { x: 120, y: 120, size: 12 });
+      const block = await claimBlock(pool, alice, { x: 175, y: 150, size: 12 });
       expect(await tilesOf(pool, block.id)).toHaveLength(144);
       expect(await countTiles(pool)).toBe(144);
     });
 
-    it("claims a block at the cap and holds all 625 tiles", async () => {
-      const block = await claimBlock(pool, alice, { x: 110, y: 110, size: MAX_BLOCK_SIZE });
-      expect(await tilesOf(pool, block.id)).toHaveLength(625);
+    it("claims a planet at the inner belt's cap and holds all its tiles", async () => {
+      // Far enough out to be in the inner belt, which is the orbit that takes
+      // the biggest planets.
+      const block = await claimBlock(pool, alice, { x: 175, y: 150, size: MAX_BLOCK_SIZE });
+      expect(await tilesOf(pool, block.id)).toHaveLength(MAX_BLOCK_SIZE * MAX_BLOCK_SIZE);
+    });
+
+    it("refuses a planet too big for the orbit it is standing in", async () => {
+      // Nine wide is fine almost anywhere, and not in the outer reach.
+      await expect(claimBlock(pool, alice, { x: 250, y: 150, size: 9 })).rejects.toBeInstanceOf(
+        SizeNotAllowedHereError,
+      );
+      expect(await countTiles(pool)).toBe(0);
     });
 
     it("refuses anything past the cap, so no one can corner the board", async () => {
@@ -85,8 +96,8 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
     it("still cannot overlap, however large it is", async () => {
       await claimBlock(pool, alice, { x: 150, y: 150, size: 1 });
 
-      // A 20x20 covering that single tile loses to it: size buys nothing.
-      await expect(claimBlock(pool, bob, { x: 140, y: 140, size: 20 })).rejects.toBeInstanceOf(
+      // A big planet covering that single tile loses to it: size buys nothing.
+      await expect(claimBlock(pool, bob, { x: 145, y: 145, size: 10 })).rejects.toBeInstanceOf(
         TileConflictError,
       );
       expect(await countTiles(pool)).toBe(1);
@@ -94,8 +105,8 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
 
     it("lets a big block fill the gap around what is already held", async () => {
       await claimBlock(pool, alice, { x: 100, y: 100, size: 1 });
-      const big = await claimBlock(pool, bob, { x: 101, y: 101, size: 20 });
-      expect(await tilesOf(pool, big.id)).toHaveLength(400);
+      const big = await claimBlock(pool, bob, { x: 101, y: 101, size: 6 });
+      expect(await tilesOf(pool, big.id)).toHaveLength(36);
     });
   });
 

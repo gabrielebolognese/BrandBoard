@@ -436,7 +436,9 @@ export function createCheckout({ settings, onChange, onReserved, onConflict }) {
     }
 
     if (payState.status !== "trialling") {
-      const pay = button("primary", `Pay ${money(session.monthlyTotalCents)} per month`);
+      // The total is already on screen directly above. Restating it on the
+      // button turns a step into a sales pitch.
+      const pay = button("primary", "Checkout");
       if (payState.status === "working") {
         pay.disabled = true;
         pay.textContent = "Contacting payment provider...";

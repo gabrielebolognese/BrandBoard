@@ -215,6 +215,42 @@ function priceOf(square) {
   return cents;
 }
 
+/** Nearest and furthest this square gets from the centre of the universe. */
+function distanceRange(square) {
+  const dx = Math.max(square.x - boardCenter, 0, boardCenter - (square.x + square.size));
+  const dy = Math.max(square.y - boardCenter, 0, boardCenter - (square.y + square.size));
+  const min = Math.sqrt(dx * dx + dy * dy);
+
+  let max = 0;
+  for (const [cx, cy] of [
+    [square.x, square.y],
+    [square.x + square.size, square.y],
+    [square.x, square.y + square.size],
+    [square.x + square.size, square.y + square.size],
+  ]) {
+    const ex = cx - boardCenter;
+    const ey = cy - boardCenter;
+    max = Math.max(max, Math.sqrt(ex * ex + ey * ey));
+  }
+  return { min, max };
+}
+
+/**
+ * The largest planet allowed here: the strictest cap among every orbit this
+ * square touches. Mirrors the server so a drag stops at the limit instead of
+ * growing into something that will be refused.
+ */
+function sizeCapAt(square) {
+  const { min, max } = distanceRange(square);
+  let cap = maxBlockSize;
+  let inner = 0;
+  for (const orbit of orbits) {
+    if (max > inner && min < orbit.outerRadius) cap = Math.min(cap, orbit.maxSize);
+    inner = orbit.outerRadius;
+  }
+  return cap;
+}
+
 /** A planet is inside the universe only when its furthest corner is. */
 function inUniverse(square) {
   const corners = [
@@ -804,7 +840,8 @@ function showBadge(square, clientX, clientY) {
   const middle = Math.floor(square.size / 2);
   const orbit = orbitAt(square.x + middle, square.y + middle);
   const where = orbit === null ? "the void" : orbit.label;
-  const capped = square.size >= maxBlockSize ? " &middot; max size" : "";
+  const cap = sizeCapAt(square);
+  const capped = square.size >= cap ? ` &middot; ${cap}x${cap} max here` : "";
   badge.innerHTML =
     `${square.size}x${square.size} <small>${square.size * square.size} tiles ` +
     `&middot; ${where}${capped}</small>`;
@@ -993,12 +1030,19 @@ canvas.addEventListener("pointerleave", () => {
 function squareFromDrag(anchor, current) {
   const dx = current.x - anchor.x;
   const dy = current.y - anchor.y;
-  const size = Math.min(maxBlockSize, Math.max(Math.abs(dx), Math.abs(dy)) + 1);
-  let x = dx < 0 ? anchor.x - (size - 1) : anchor.x;
-  let y = dy < 0 ? anchor.y - (size - 1) : anchor.y;
-  x = Math.min(Math.max(x, 0), BOARD - size);
-  y = Math.min(Math.max(y, 0), BOARD - size);
-  return { x, y, size };
+  const wanted = Math.min(maxBlockSize, Math.max(Math.abs(dx), Math.abs(dy)) + 1);
+
+  // Shrink until the square is one the ground under it will take. The caps are
+  // small, so this settles in a handful of steps.
+  for (let size = wanted; size >= 1; size -= 1) {
+    let x = dx < 0 ? anchor.x - (size - 1) : anchor.x;
+    let y = dy < 0 ? anchor.y - (size - 1) : anchor.y;
+    x = Math.min(Math.max(x, 0), BOARD - size);
+    y = Math.min(Math.max(y, 0), BOARD - size);
+    const square = { x, y, size };
+    if (size <= sizeCapAt(square)) return square;
+  }
+  return { x: anchor.x, y: anchor.y, size: 1 };
 }
 
 canvas.addEventListener(

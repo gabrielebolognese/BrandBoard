@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { BOARD_CENTER, BOARD_SIZE, MAX_BLOCK_SIZE, UNIVERSE_RADIUS } from "../config.js";
+import {
+  BOARD_CENTER,
+  BOARD_SIZE,
+  MAX_BLOCK_SIZE,
+  ORBITS,
+  UNIVERSE_RADIUS,
+  isSizeAllowedAt,
+  largestAllowedAt,
+  sizeCapAt,
+} from "../config.js";
 import {
   isInBounds,
   isInUniverse,
@@ -31,14 +40,12 @@ describe("bounds", () => {
     expect([0, 2.5, -1, MAX_BLOCK_SIZE + 1, BOARD_SIZE].every((size) => !isValidSize(size))).toBe(
       true,
     );
-    expect([1, 2, 5, 6, 17, MAX_BLOCK_SIZE].every(isValidSize)).toBe(true);
+    expect([1, 2, 5, 6, 12, MAX_BLOCK_SIZE].every(isValidSize)).toBe(true);
   });
 
-  it("caps blocks at 25x25 so nobody can corner the board", () => {
-    expect(MAX_BLOCK_SIZE).toBe(25);
-    // 625 tiles, 6.25% of the board.
-    expect(MAX_BLOCK_SIZE * MAX_BLOCK_SIZE).toBe(625);
-    expect(isValidSize(26)).toBe(false);
+  it("caps planets at the largest any orbit allows", () => {
+    expect(MAX_BLOCK_SIZE).toBe(15);
+    expect(isValidSize(16)).toBe(false);
   });
 
   it("still requires a legal square to fit inside the board", () => {
@@ -104,5 +111,39 @@ describe("the universe", () => {
     const justInside = C + UNIVERSE_RADIUS - 3;
     expect(isInUniverse({ x: justInside, y: C, size: 1 })).toBe(true);
     expect(isInUniverse({ x: justInside, y: C, size: 10 })).toBe(false);
+  });
+});
+
+describe("size caps by orbit", () => {
+  const C = BOARD_CENTER;
+
+  it("allows a bigger planet in the inner belt than anywhere else", () => {
+    expect(ORBITS.map((o) => o.maxSize)).toEqual([10, 15, 6]);
+  });
+
+  it("caps the core at ten", () => {
+    expect(sizeCapAt(C - 5, C - 5, 10)).toBe(10);
+    expect(isSizeAllowedAt(C - 5, C - 5, 10)).toBe(true);
+    expect(isSizeAllowedAt(C - 6, C - 6, 12)).toBe(false);
+  });
+
+  it("caps the outer reach at six, which is the point of the rule", () => {
+    // Cheap ground, so without this the move is an enormous cheap planet.
+    expect(sizeCapAt(C + 100, C, 6)).toBe(6);
+    expect(isSizeAllowedAt(C + 100, C, 6)).toBe(true);
+    expect(isSizeAllowedAt(C + 100, C, 7)).toBe(false);
+  });
+
+  it("takes the strictest cap of every orbit the planet touches", () => {
+    // Anchored in the inner belt but reaching into the outer reach: the outer
+    // limit wins, otherwise straddling the boundary would defeat it.
+    const straddling = { x: C + 56, y: C, size: 12 };
+    expect(sizeCapAt(straddling.x, straddling.y, straddling.size)).toBe(6);
+    expect(isSizeAllowedAt(straddling.x, straddling.y, straddling.size)).toBe(false);
+  });
+
+  it("offers the largest size that will actually be accepted", () => {
+    expect(largestAllowedAt(C + 100, C, 15)).toBeLessThanOrEqual(6);
+    expect(largestAllowedAt(C + 30, C, 15)).toBeGreaterThan(6);
   });
 });

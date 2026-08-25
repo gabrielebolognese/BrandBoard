@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { MAX_BLOCK_SIZE, RESERVATION_TTL_MINUTES } from "../config.js";
+import { MAX_BLOCK_SIZE, RESERVATION_TTL_MINUTES, orbitAt, sizeCapAt } from "../config.js";
 import { isTileCollision, tileFromErrorDetail, withTransaction } from "../db/client.js";
 import type { Queryable } from "../db/client.js";
 import { releaseExpiredReservations } from "./cleanup.js";
@@ -8,6 +8,7 @@ import {
   InvalidSizeError,
   OutOfBoundsError,
   OutsideUniverseError,
+  SizeNotAllowedHereError,
   TileConflictError,
 } from "./errors.js";
 import type { ConflictingTile } from "./errors.js";
@@ -121,6 +122,14 @@ function validateClaim(placements: readonly Placement[]): void {
     }
     if (!isInUniverse(placement)) {
       throw new OutsideUniverseError(placement.x, placement.y, placement.size);
+    }
+
+    // Big enough to fit and still too big for where it is standing.
+    const cap = sizeCapAt(placement.x, placement.y, placement.size);
+    if (placement.size > cap) {
+      const middle = Math.floor(placement.size / 2);
+      const orbit = orbitAt(placement.x + middle, placement.y + middle);
+      throw new SizeNotAllowedHereError(placement.size, cap, orbit?.label ?? "That orbit");
     }
   }
 

@@ -57,6 +57,7 @@ import {
   isValidFeaturedDays,
   monthlyPriceCents,
   orbitAt,
+  sizeCapAt,
 } from "./config.js";
 import { createPool } from "./db/client.js";
 import sharp from "sharp";
@@ -238,6 +239,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         return sendJson(res, 400, {
           error: "outside_universe",
           message: "Nothing out there is for sale.",
+        });
+      }
+      const cap = sizeCapAt(x, y, size);
+      if (size > cap) {
+        return sendJson(res, 400, {
+          error: "size_not_allowed_here",
+          message: `That orbit takes planets up to ${cap}x${cap}.`,
+          cap,
         });
       }
       return sendJson(res, 200, quote(x, y, size));

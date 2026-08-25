@@ -4,7 +4,13 @@ import { claimBlock } from "./board/claim.js";
 import { avatarPixelsFor, generateAvatar } from "./board/avatar.js";
 import { invalidateCompositeBoard } from "./board/composite.js";
 import { TileConflictError } from "./board/errors.js";
-import { BOARD_CENTER, UNIVERSE_RADIUS, featuredPriceCents, fitsInUniverse } from "./config.js";
+import {
+  BOARD_CENTER,
+  UNIVERSE_RADIUS,
+  featuredPriceCents,
+  fitsInUniverse,
+  isSizeAllowedAt,
+} from "./config.js";
 
 /**
  * Fills the board with plausible fake listings so the rendering work has
@@ -199,7 +205,7 @@ function pickSize(random: () => number): number {
   if (roll < 0.80) return 3;
   if (roll < 0.90) return 4;
   if (roll < 0.96) return 5;
-  return 6 + Math.floor(random() * 7); // 6 through 12
+  return 6 + Math.floor(random() * 8); // 6 through 13, trimmed by the orbit
 }
 
 function pick<T>(random: () => number, values: readonly T[]): T {
@@ -243,7 +249,9 @@ function pickSpot(random: () => number, size: number): { x: number; y: number } 
     const x = Math.round(BOARD_CENTER + Math.cos(angle) * radius) - Math.floor(size / 2);
     const y = Math.round(BOARD_CENTER + Math.sin(angle) * radius) - Math.floor(size / 2);
     if (x < 0 || y < 0) continue;
-    if (fitsInUniverse(x, y, size)) return { x, y };
+    // The orbit a spot lands in decides how big a planet it will take, so a
+    // seeded planet has to satisfy the same rule a bought one does.
+    if (fitsInUniverse(x, y, size) && isSizeAllowedAt(x, y, size)) return { x, y };
   }
   return null;
 }

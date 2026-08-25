@@ -74,14 +74,23 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
       });
     });
 
-    it("refuses a block larger than the cap, even where it would fit", async () => {
+    it("refuses a planet larger than the cap, even where it would fit", async () => {
+      // Past the overall ceiling and past every orbit's own limit, so the
+      // database may cite either constraint. Both are check violations.
       await expect(reserve(pool, alice, 100, 100, MAX_BLOCK_SIZE + 1)).rejects.toMatchObject({
-        constraint: "blocks_size_range",
+        code: "23514",
       });
     });
 
-    it("accepts a block right at the cap", async () => {
-      await expect(reserve(pool, alice, 110, 110, MAX_BLOCK_SIZE)).resolves.toBeDefined();
+    it("accepts a planet right at the cap, in the orbit that allows it", async () => {
+      await expect(reserve(pool, alice, 175, 150, MAX_BLOCK_SIZE)).resolves.toBeDefined();
+    });
+
+    it("refuses a planet too big for the orbit it sits in", async () => {
+      // The outer reach takes six, and this is nine.
+      await expect(reserve(pool, alice, 250, 150, 9)).rejects.toMatchObject({
+        constraint: "blocks_size_fits_orbit",
+      });
     });
 
     it("still refuses a planet that runs off the edge, at any size", async () => {

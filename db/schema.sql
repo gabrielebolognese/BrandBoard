@@ -40,7 +40,40 @@ CREATE OR REPLACE FUNCTION fits_in_universe(px numeric, py numeric, psize numeri
 $$;
 
 CREATE OR REPLACE FUNCTION max_block_size() RETURNS smallint
-  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 25::smallint $$;
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 15::smallint $$;
+
+/*
+ * Size is capped per orbit, and the caps do not follow the price: core 10,
+ * inner belt 15, outer reach 6. The outer reach is the cheapest ground, so
+ * without a limit the rational move is an enormous cheap planet out there.
+ *
+ * The cap is the strictest among every orbit the square touches, not the cap
+ * of whichever orbit its centre falls in. Otherwise a planet could be centred
+ * just inside the inner belt and sprawl out into the outer reach at fifteen
+ * wide, which is the exact thing the outer limit exists to prevent.
+ */
+CREATE OR REPLACE FUNCTION planet_size_cap(px numeric, py numeric, psize numeric)
+  RETURNS smallint LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  WITH c AS (SELECT board_size() / 2.0 AS cx, board_size() / 2.0 AS cy),
+  d AS (
+    SELECT
+      -- Nearest point of the square to the centre, zero when it straddles it.
+      sqrt(power(greatest(px - cx, 0, cx - (px + psize)), 2)
+         + power(greatest(py - cy, 0, cy - (py + psize)), 2)) AS dmin,
+      greatest(
+        point(px, py)                 <-> point(cx, cy),
+        point(px + psize, py)         <-> point(cx, cy),
+        point(px, py + psize)         <-> point(cx, cy),
+        point(px + psize, py + psize) <-> point(cx, cy)
+      ) AS dmax
+    FROM c
+  )
+  SELECT least(
+    CASE WHEN dmin < 20                 THEN 10 ELSE 999 END,
+    CASE WHEN dmax > 20 AND dmin < 60   THEN 15 ELSE 999 END,
+    CASE WHEN dmax > 60                 THEN  6 ELSE 999 END
+  )::smallint FROM d
+$$;
 
 -- ---------------------------------------------------------------------------
 -- users
@@ -134,6 +167,10 @@ CREATE TABLE IF NOT EXISTS blocks (
   -- And inside the disc, not merely inside the square that contains it.
   CONSTRAINT blocks_within_universe
     CHECK (fits_in_universe(x::numeric, y::numeric, size::numeric)),
+
+  -- And no larger than the orbits it touches allow.
+  CONSTRAINT blocks_size_fits_orbit
+    CHECK (size <= planet_size_cap(x::numeric, y::numeric, size::numeric)),
 
   -- reserved_until is meaningful only while reserved, and is cleared on payment.
   CONSTRAINT blocks_reservation_window CHECK (
@@ -354,6 +391,15 @@ END $$;
 DO $$ BEGIN
   ALTER TABLE blocks ADD CONSTRAINT blocks_within_universe
     CHECK (fits_in_universe(x::numeric, y::numeric, size::numeric));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Per-orbit size caps arrived after the universe did. Adding this fails loudly
+-- if any existing planet is larger than its orbit now allows, which is correct:
+-- that is data the new rule forbids and it needs a decision, not a silent pass.
+DO $$ BEGIN
+  ALTER TABLE blocks ADD CONSTRAINT blocks_size_fits_orbit
+    CHECK (size <= planet_size_cap(x::numeric, y::numeric, size::numeric));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

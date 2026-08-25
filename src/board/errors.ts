@@ -4,6 +4,7 @@ export type ClaimErrorCode =
   | "invalid_size"
   | "out_of_bounds"
   | "outside_universe"
+  | "size_not_allowed_here"
   | "tile_conflict"
   | "empty_claim";
 
@@ -51,6 +52,24 @@ export class OutsideUniverseError extends ClaimError {
   ) {
     super(`(${x}, ${y}) is outside the universe. Nothing out there is for sale.`);
     this.name = "OutsideUniverseError";
+  }
+}
+
+/**
+ * The planet fits on the board and inside the universe, and is still too big
+ * for the ground it is standing on.
+ */
+export class SizeNotAllowedHereError extends ClaimError {
+  readonly code = "size_not_allowed_here";
+  readonly status = 400;
+
+  constructor(
+    readonly size: number,
+    readonly cap: number,
+    readonly where: string,
+  ) {
+    super(`${where} takes planets up to ${cap}x${cap}, and this one is ${size}x${size}.`);
+    this.name = "SizeNotAllowedHereError";
   }
 }
 

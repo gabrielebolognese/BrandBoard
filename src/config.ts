@@ -10,12 +10,10 @@ export const BOARD_SIZE = 300;
 export const MIN_BLOCK_SIZE = 1;
 
 /**
- * Largest square anyone may buy, in tiles. The cap exists so no single buyer
- * can corner the sky. Below it, a planet may sit at any free (x, y) and the
- * only other rules are that it cannot overlap tiles someone already holds and
- * must fit inside the universe.
+ * The largest square any orbit allows. Each orbit has its own, stricter limit
+ * below; this is only the ceiling none of them exceeds.
  */
-export const MAX_BLOCK_SIZE = 25;
+export const MAX_BLOCK_SIZE = 15;
 
 // ---------------------------------------------------------------------------
 // Orbits
@@ -41,12 +39,30 @@ export interface Orbit {
   /** Everything closer than this, and no closer than the previous orbit. */
   readonly outerRadius: number;
   readonly centsPerTilePerMonth: number;
+  /** The largest planet this orbit will take. */
+  readonly maxSize: number;
 }
 
+/**
+ * Size is capped per orbit, and the caps do not follow the price.
+ *
+ * The outer reach is the cheapest ground, so without a limit the rational move
+ * is to buy an enormous cheap planet out there and dominate the sky for very
+ * little. Six is small enough that the outer reach stays what it is meant to
+ * be: a lot of room for a lot of people. The inner belt takes the biggest
+ * planets because that is the ground worth showing off on, and the core is kept
+ * moderate so a single buyer cannot swallow the middle of the universe.
+ */
 export const ORBITS: readonly Orbit[] = [
-  { name: "core", label: "Core", outerRadius: 20, centsPerTilePerMonth: 500 },
-  { name: "inner", label: "Inner belt", outerRadius: 60, centsPerTilePerMonth: 300 },
-  { name: "outer", label: "Outer reach", outerRadius: UNIVERSE_RADIUS, centsPerTilePerMonth: 100 },
+  { name: "core", label: "Core", outerRadius: 20, centsPerTilePerMonth: 500, maxSize: 10 },
+  { name: "inner", label: "Inner belt", outerRadius: 60, centsPerTilePerMonth: 300, maxSize: 15 },
+  {
+    name: "outer",
+    label: "Outer reach",
+    outerRadius: UNIVERSE_RADIUS,
+    centsPerTilePerMonth: 100,
+    maxSize: 6,
+  },
 ];
 
 /** Distance from the centre of the universe to the centre of a tile. */
@@ -82,6 +98,61 @@ export function monthlyPriceCents(x: number, y: number, size: number): number {
     }
   }
   return cents;
+}
+
+/** Nearest and furthest a square gets from the centre of the universe. */
+function distanceRange(x: number, y: number, size: number): { min: number; max: number } {
+  const dx = Math.max(x - BOARD_CENTER, 0, BOARD_CENTER - (x + size));
+  const dy = Math.max(y - BOARD_CENTER, 0, BOARD_CENTER - (y + size));
+  const min = Math.sqrt(dx * dx + dy * dy);
+
+  let max = 0;
+  for (const [cx, cy] of [
+    [x, y],
+    [x + size, y],
+    [x, y + size],
+    [x + size, y + size],
+  ]) {
+    const ex = (cx ?? 0) - BOARD_CENTER;
+    const ey = (cy ?? 0) - BOARD_CENTER;
+    max = Math.max(max, Math.sqrt(ex * ex + ey * ey));
+  }
+  return { min, max };
+}
+
+/**
+ * The largest planet allowed where this one sits: the strictest cap among every
+ * orbit it touches.
+ *
+ * Strictest, not the cap of whichever orbit its centre happens to fall in.
+ * Otherwise a planet could be centred just inside the inner belt and sprawl out
+ * into the outer reach at fifteen wide, which is the exact thing the outer
+ * reach's limit exists to prevent.
+ */
+export function sizeCapAt(x: number, y: number, size: number): number {
+  const { min, max } = distanceRange(x, y, size);
+  let cap = MAX_BLOCK_SIZE;
+  let inner = 0;
+
+  for (const orbit of ORBITS) {
+    const touches = max > inner && min < orbit.outerRadius;
+    if (touches) cap = Math.min(cap, orbit.maxSize);
+    inner = orbit.outerRadius;
+  }
+  return cap;
+}
+
+/** Whether a planet of this size is allowed to sit here. */
+export function isSizeAllowedAt(x: number, y: number, size: number): boolean {
+  return size <= sizeCapAt(x, y, size);
+}
+
+/** The biggest planet that will actually be accepted at this anchor. */
+export function largestAllowedAt(x: number, y: number, wanted: number): number {
+  for (let size = Math.min(wanted, MAX_BLOCK_SIZE); size >= 1; size -= 1) {
+    if (fitsInUniverse(x, y, size) && isSizeAllowedAt(x, y, size)) return size;
+  }
+  return 0;
 }
 
 /**
