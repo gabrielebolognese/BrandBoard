@@ -5,9 +5,18 @@ import { TILE_INSET, TILE_PIXELS } from "../config.js";
 /** Sensible default when no block size is known. */
 export const AVATAR_PIXELS = 160;
 
-/** Rendered size of a block's avatar, capped so a huge block is not a huge file. */
+/**
+ * Rendered size of a planet's avatar.
+ *
+ * Never smaller than DETAIL_PIXELS, whatever the planet's size. Generating at
+ * board resolution meant a 1x1 avatar was ten pixels, and no amount of asking
+ * for a 256px sprite later can invent detail that was never drawn. Real
+ * listings upload something large; the seeded ones have to match that.
+ */
+const DETAIL_PIXELS = 320;
+
 export function avatarPixelsFor(size: number): number {
-  return Math.min(512, size * TILE_PIXELS - 2 * TILE_INSET);
+  return Math.min(512, Math.max(DETAIL_PIXELS, size * TILE_PIXELS - 2 * TILE_INSET));
 }
 
 /**

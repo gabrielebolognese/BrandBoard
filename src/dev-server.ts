@@ -5,7 +5,12 @@ import { basename, extname } from "node:path";
 import type { Pool } from "pg";
 import { claimBlocks } from "./board/claim.js";
 import { runReservationSweep } from "./board/cleanup.js";
-import { getCompositeBoard, invalidateCompositeBoard, localAvatarStore } from "./board/composite.js";
+import {
+  getCompositeBoard,
+  invalidateCompositeBoard,
+  localAvatarStore,
+  renderPlanet,
+} from "./board/composite.js";
 import { ClaimError, TileConflictError } from "./board/errors.js";
 import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
@@ -42,6 +47,7 @@ import {
   orbitAt,
 } from "./config.js";
 import { createPool } from "./db/client.js";
+import sharp from "sharp";
 import { seedBoard } from "./seed.js";
 
 /**
@@ -174,6 +180,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return sendFile(res, new URL(basename(avatar[1]), AVATAR_DIR));
     }
 
+    const planet = /^\/api\/planet\/([0-9a-f-]{36})$/.exec(path);
+    if (planet?.[1] !== undefined) {
+      return sendPlanet(req, res, planet[1], Number(requestUrl.searchParams.get("px") ?? "128"));
+    }
+
     const block = /^\/api\/block\/([0-9a-f-]{36})$/.exec(path);
     if (block?.[1] !== undefined) return sendBlockDetail(res, block[1]);
 
@@ -286,6 +297,78 @@ async function sendAvailability(res: ServerResponse): Promise<void> {
     bits: bitmap.toString("base64"),
     heldTiles: countBits(bitmap),
   });
+}
+
+/**
+ * One planet, rendered on its own at a requested size.
+ *
+ * The board sheet is drawn at twelve pixels per tile, which is right for
+ * looking at the whole universe and far too coarse once someone zooms into a
+ * single world: a 1x1 planet is ten pixels there. Rather than ship a sharper
+ * sheet, which would be enormous and mostly wasted, the client asks for detail
+ * only for the planets it is actually showing large.
+ *
+ * Sizes are restricted to a few tiers so the cache is small and shared: a
+ * hundred people zooming into the same planet render it once.
+ */
+const PLANET_TIERS = [64, 128, 256, 512];
+const planetCache = new Map<string, Buffer>();
+const PLANET_CACHE_LIMIT = 400;
+
+async function sendPlanet(
+  req: IncomingMessage,
+  res: ServerResponse,
+  blockId: string,
+  requestedPx: number,
+): Promise<void> {
+  const px = PLANET_TIERS.find((tier) => tier >= requestedPx) ?? PLANET_TIERS[PLANET_TIERS.length - 1];
+  if (px === undefined) return sendJson(res, 400, { error: "bad_size" });
+
+  const key = `${blockId}:${px}`;
+  const etag = `"planet-${key}"`;
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, { etag }).end();
+    return;
+  }
+
+  let image = planetCache.get(key);
+  if (image === undefined) {
+    const found = await pool.query<{ image_url: string | null }>(
+      `SELECT image_url FROM blocks WHERE id = $1 AND status = 'live'`,
+      [blockId],
+    );
+    const imageUrl = found.rows[0]?.image_url;
+    if (imageUrl === undefined || imageUrl === null) {
+      return sendJson(res, 404, { error: "not_found" });
+    }
+
+    try {
+      // WebP, not the PNG the sheet compositor wants: a 512px sprite is 283KB
+      // as PNG and a fraction of that as WebP, and these are fetched per planet
+      // per zoom level.
+      image = await sharp(await renderPlanet(await avatars.read(imageUrl), px))
+        .webp({ quality: 90, alphaQuality: 90 })
+        .toBuffer();
+    } catch {
+      return sendJson(res, 404, { error: "avatar_unavailable" });
+    }
+
+    // Oldest out first: whoever is zoomed in now is who matters.
+    if (planetCache.size >= PLANET_CACHE_LIMIT) {
+      const oldest = planetCache.keys().next().value;
+      if (oldest !== undefined) planetCache.delete(oldest);
+    }
+    planetCache.set(key, image);
+  }
+
+  res.writeHead(200, {
+    "content-type": "image/webp",
+    "content-length": image.length,
+    "cache-control": "public, max-age=600",
+    "x-content-type-options": "nosniff",
+    etag,
+  });
+  res.end(image);
 }
 
 async function sendBlockDetail(res: ServerResponse, id: string): Promise<void> {

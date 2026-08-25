@@ -168,9 +168,7 @@ body {
   border-radius: var(--radius);
   overflow: hidden;
   background-color: #04060f;
-  background-image: url("/board.webp");
   background-repeat: no-repeat;
-  image-rendering: auto;
   cursor: pointer;
 }
 
@@ -287,9 +285,7 @@ body {
   width: 52px;
   height: 52px;
   border-radius: 8px;
-  background-image: url("/board.webp");
   background-repeat: no-repeat;
-  image-rendering: auto;
 }
 
 .card-body { min-width: 0; }
@@ -382,6 +378,24 @@ body {
   border-left: 1px solid #2b3546;
   font-variant-numeric: tabular-nums;
 }
+
+
+.cart-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 3px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  font-weight: 660;
+  color: #06240f;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.cart-go::after { content: "92"; font-weight: 700; }
+
+.cart-launcher:hover .cart-go { filter: brightness(1.08); }
 
 /* modal ------------------------------------------------------------------- */
 

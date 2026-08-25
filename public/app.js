@@ -395,6 +395,98 @@ function buildHalo() {
   haloSprite = canvas;
 }
 
+/**
+ * Detail on demand.
+ *
+ * The board sheet is one image at twelve pixels per tile, which is right for
+ * the whole universe and far too coarse for one world: a 1x1 planet is ten
+ * pixels there, so zooming in was showing a ten pixel circle blown up eight
+ * times. Rather than ship a sharper sheet, which would be enormous and almost
+ * entirely wasted, planets that are actually being shown large ask for their
+ * own image at a size that suits.
+ *
+ * Nothing is fetched while zoomed out, because nothing needs it: the sheet is
+ * already sharper than the screen at that point. Zooming in is what creates
+ * demand, and only for what is on screen.
+ */
+const PLANET_TIERS = [64, 128, 256, 512];
+const MAX_SPRITE_CACHE = 260;
+const MAX_IN_FLIGHT = 6;
+
+const spriteCache = new Map();
+let inFlight = 0;
+
+/** The tier that covers this on-screen size, or null when the sheet suffices. */
+function tierFor(sheetDiameter, screenDiameter) {
+  // A little slack: swapping images for a 5% gain would just cause churn.
+  if (screenDiameter <= sheetDiameter * 1.15) return null;
+  for (const tier of PLANET_TIERS) {
+    if (tier >= screenDiameter) return tier;
+  }
+  return PLANET_TIERS[PLANET_TIERS.length - 1];
+}
+
+function spriteFor(block, tier) {
+  const key = `${block.id}:${tier}`;
+  const cached = spriteCache.get(key);
+  if (cached !== undefined) {
+    // Touch it, so the eviction below drops what nobody is looking at.
+    spriteCache.delete(key);
+    spriteCache.set(key, cached);
+    return cached.image;
+  }
+  if (inFlight >= MAX_IN_FLIGHT) return null;
+
+  inFlight += 1;
+  const entry = { image: null };
+  spriteCache.set(key, entry);
+
+  const image = new Image();
+  image.onload = () => {
+    entry.image = image;
+    inFlight -= 1;
+    dirty = true;
+  };
+  image.onerror = () => {
+    inFlight -= 1;
+    spriteCache.delete(key);
+  };
+  image.src = `/api/planet/${block.id}?px=${tier}`;
+
+  if (spriteCache.size > MAX_SPRITE_CACHE) {
+    const oldest = spriteCache.keys().next().value;
+    if (oldest !== undefined && oldest !== key) spriteCache.delete(oldest);
+  }
+  return null;
+}
+
+/**
+ * Draws the sharp version over the sheet for anything big enough to need it.
+ *
+ * Exactly the same rect as the sheet drew, so a sprite arriving mid-pan swaps
+ * in without anything moving.
+ */
+function drawPlanetDetail(rect) {
+  if (blocks.length === 0) return;
+
+  // Biggest first: if the in-flight budget runs out, spend it where it shows.
+  const candidates = [];
+  for (const block of blocks) {
+    const r = rectFor(block);
+    if (r.x > rect.width || r.y > rect.height || r.x + r.side < 0 || r.y + r.side < 0) continue;
+    const sheetDiameter = block.size * TILE - 2 * INSET;
+    const tier = tierFor(sheetDiameter, r.side);
+    if (tier === null) continue;
+    candidates.push({ block, r, tier });
+  }
+  candidates.sort((a, b) => b.r.side - a.r.side);
+
+  for (const { block, r, tier } of candidates) {
+    const sprite = spriteFor(block, tier);
+    if (sprite !== null) ctx.drawImage(sprite, r.x, r.y, r.side, r.side);
+  }
+}
+
 /** Drawn under the planet sheet, so every world sits in its own glow. */
 function drawHalos(rect, seconds) {
   if (haloSprite === null) return;
@@ -603,6 +695,7 @@ function draw() {
     );
   }
 
+  drawPlanetDetail(rect);
   drawClaimedOrbits(seconds);
 
   const square = currentSquare();
@@ -719,12 +812,12 @@ function hideBadge() {
 }
 
 function showCard(block, clientX, clientY) {
-  // The avatar is cropped straight out of the composite, so hovering costs no
-  // extra image request.
-  const k = 52 / (block.size * TILE);
+  // The planet at a size worth looking at, rather than a crop of the sheet
+  // blown up from ten pixels.
   const avatar = document.getElementById("card-avatar");
-  avatar.style.backgroundSize = `${PX * k}px ${PX * k}px`;
-  avatar.style.backgroundPosition = `${-block.x * TILE * k}px ${-block.y * TILE * k}px`;
+  avatar.style.backgroundImage = `url(/api/planet/${block.id}?px=128)`;
+  avatar.style.backgroundSize = "cover";
+  avatar.style.backgroundPosition = "center";
 
   document.getElementById("card-name").textContent = block.name;
   document.getElementById("card-handle").textContent = `@${block.handle}`;

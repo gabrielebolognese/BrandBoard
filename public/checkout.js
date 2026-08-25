@@ -106,15 +106,17 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
       launcher.innerHTML =
         `<span class="cart-count">${session.lines.length}</span>` +
         `<span>Reserved</span>` +
-        `<span class="cart-total">${money(session.monthlyTotalCents)}/mo</span>`;
+        `<span class="cart-total">${money(session.monthlyTotalCents)}/mo</span>` +
+        `<span class="cart-go">Proceed</span>`;
       return;
     }
 
     const total = items.reduce((sum, i) => sum + priceOf(i), 0);
     launcher.innerHTML =
       `<span class="cart-count">${items.length}</span>` +
-      `<span>${items.length === 1 ? "block" : "blocks"} selected</span>` +
-      `<span class="cart-total">${money(total)}/mo</span>`;
+      `<span>${items.length === 1 ? "planet" : "planets"} selected</span>` +
+      `<span class="cart-total">${money(total)}/mo</span>` +
+      `<span class="cart-go">Proceed</span>`;
   }
 
   function openAt(next) {

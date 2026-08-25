@@ -98,7 +98,7 @@ async function renderBoard(
     try {
       const avatar = await avatars.read(block.image_url);
       layers.push({
-        input: await planet(avatar, rect.side),
+        input: await renderPlanet(avatar, rect.side),
         left: rect.left,
         top: rect.top,
       });
@@ -123,7 +123,7 @@ async function renderBoard(
  * twenty five of those, so both are built once and reused. Without that this
  * would rasterise two SVGs per planet on every render.
  */
-async function planet(avatar: Buffer, diameter: number): Promise<Buffer> {
+export async function renderPlanet(avatar: Buffer, diameter: number): Promise<Buffer> {
   return sharp(avatar)
     .resize(diameter, diameter, { fit: "cover" })
     .ensureAlpha()
