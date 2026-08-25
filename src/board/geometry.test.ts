@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { BOARD_SIZE, MAX_BLOCK_SIZE } from "../config.js";
-import { isInBounds, isValidSize, placementsOverlap, tilesForBlock } from "./geometry.js";
+import { BOARD_CENTER, BOARD_SIZE, MAX_BLOCK_SIZE, UNIVERSE_RADIUS } from "../config.js";
+import {
+  isInBounds,
+  isInUniverse,
+  isValidSize,
+  placementsOverlap,
+  tilesForBlock,
+} from "./geometry.js";
 
 describe("bounds", () => {
-  it("rejects a size 3 block at (98, 98) because it would run off the board", () => {
-    expect(isInBounds({ x: 98, y: 98, size: 3 })).toBe(false);
+  it("rejects a size 3 planet at the very edge because it would run off the board", () => {
+    expect(isInBounds({ x: BOARD_SIZE - 2, y: BOARD_SIZE - 2, size: 3 })).toBe(false);
   });
 
   it("accepts the same square where it does fit", () => {
-    expect(isInBounds({ x: 97, y: 97, size: 3 })).toBe(true);
+    expect(isInBounds({ x: BOARD_SIZE - 3, y: BOARD_SIZE - 3, size: 3 })).toBe(true);
   });
 
   it("accepts a 1x1 in the last tile and rejects the one past it", () => {
@@ -36,8 +42,8 @@ describe("bounds", () => {
   });
 
   it("still requires a legal square to fit inside the board", () => {
-    expect(isInBounds({ x: 40, y: 40, size: 20 })).toBe(true);
-    expect(isInBounds({ x: 90, y: 0, size: 11 })).toBe(false);
+    expect(isInBounds({ x: BOARD_CENTER, y: BOARD_CENTER, size: 20 })).toBe(true);
+    expect(isInBounds({ x: BOARD_SIZE - 5, y: 0, size: 11 })).toBe(false);
   });
 });
 
@@ -74,5 +80,29 @@ describe("placementsOverlap", () => {
 
   it("does not require size alignment: blocks may sit at any free anchor", () => {
     expect(placementsOverlap({ x: 3, y: 7, size: 3 }, { x: 6, y: 7, size: 2 })).toBe(false);
+  });
+});
+
+describe("the universe", () => {
+  const C = BOARD_CENTER;
+
+  it("is a disc inside the square board, so the corners are void", () => {
+    // In bounds and still not for sale: the addressable board is square only
+    // because tiles are addressed by (x, y).
+    expect(isInBounds({ x: 0, y: 0, size: 1 })).toBe(true);
+    expect(isInUniverse({ x: 0, y: 0, size: 1 })).toBe(false);
+    expect(isInUniverse({ x: BOARD_SIZE - 1, y: BOARD_SIZE - 1, size: 1 })).toBe(false);
+  });
+
+  it("accepts the centre and everything within the outer orbit", () => {
+    expect(isInUniverse({ x: C, y: C, size: 1 })).toBe(true);
+    expect(isInUniverse({ x: C + 100, y: C, size: 1 })).toBe(true);
+  });
+
+  it("is decided by the far corner, not the anchor", () => {
+    // The anchor sits just inside the rim; the opposite corner does not.
+    const justInside = C + UNIVERSE_RADIUS - 3;
+    expect(isInUniverse({ x: justInside, y: C, size: 1 })).toBe(true);
+    expect(isInUniverse({ x: justInside, y: C, size: 10 })).toBe(false);
   });
 });

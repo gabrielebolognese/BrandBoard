@@ -19,7 +19,25 @@ BEGIN;
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION board_size() RETURNS smallint
-  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 100::smallint $$;
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 300::smallint $$;
+
+CREATE OR REPLACE FUNCTION universe_radius() RETURNS numeric
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 150::numeric $$;
+
+/*
+ * The universe is a disc inside that square, and a planet is inside it only
+ * when its furthest corner is. Everything beyond is void: addressable, because
+ * tiles are addressed by (x, y), but not for sale.
+ */
+CREATE OR REPLACE FUNCTION fits_in_universe(px numeric, py numeric, psize numeric)
+  RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT greatest(
+           point(px, py)              <-> point(board_size() / 2.0, board_size() / 2.0),
+           point(px + psize, py)      <-> point(board_size() / 2.0, board_size() / 2.0),
+           point(px, py + psize)      <-> point(board_size() / 2.0, board_size() / 2.0),
+           point(px + psize, py + psize) <-> point(board_size() / 2.0, board_size() / 2.0)
+         ) <= universe_radius()
+$$;
 
 CREATE OR REPLACE FUNCTION max_block_size() RETURNS smallint
   LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT 25::smallint $$;
@@ -98,6 +116,10 @@ CREATE TABLE IF NOT EXISTS blocks (
     CHECK (x >= 0 AND y >= 0
            AND x + size <= board_size()
            AND y + size <= board_size()),
+
+  -- And inside the disc, not merely inside the square that contains it.
+  CONSTRAINT blocks_within_universe
+    CHECK (fits_in_universe(x::numeric, y::numeric, size::numeric)),
 
   -- reserved_until is meaningful only while reserved, and is cleared on payment.
   CONSTRAINT blocks_reservation_window CHECK (
@@ -305,6 +327,13 @@ ALTER TABLE blocks DROP CONSTRAINT IF EXISTS blocks_size_positive;
 DO $$ BEGIN
   ALTER TABLE blocks ADD CONSTRAINT blocks_size_range
     CHECK (size BETWEEN 1 AND max_block_size());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- The board became a disc of orbits, three hundred tiles across.
+DO $$ BEGIN
+  ALTER TABLE blocks ADD CONSTRAINT blocks_within_universe
+    CHECK (fits_in_universe(x::numeric, y::numeric, size::numeric));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

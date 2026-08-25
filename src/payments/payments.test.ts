@@ -9,7 +9,10 @@ import { recordWebhookEvent, unprocessedEvents, markEventProcessed } from "./eve
 import { fulfilPayment, outstandingRefunds, settleRefund } from "./fulfilment.js";
 import { signPayload, verifyWebhookSignature } from "./signature.js";
 
-const RATE = 200; // cents per tile per month
+import { monthlyPriceCents } from "../config.js";
+
+/** What the orbits say a planet at this spot costs; the tests assert against it. */
+const priceOf = (x: number, y: number, size: number) => monthlyPriceCents(x, y, size);
 
 describe("webhook signatures", () => {
   const secret = "pdl_ntfset_testsecret";
@@ -121,14 +124,13 @@ suite("payments [requires DATABASE_URL]", () => {
 
   describe("fulfilment", () => {
     async function order(x: number, y: number, size: number) {
-      return createCheckout(pool, buyer, [{ x, y, size }], RATE);
+      return createCheckout(pool, buyer, [{ x, y, size }]);
     }
 
     it("delivers a paid order into review, not straight onto the board", async () => {
-      const session = await order(10, 10, 3);
+      const session = await order(110, 110, 3);
       const result = await fulfilPayment(pool, {
         checkoutId: session.id,
-        rateCentsPerTilePerMonth: RATE,
         subscriptionId: "sub_1",
         currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000),
       });
@@ -150,9 +152,9 @@ suite("payments [requires DATABASE_URL]", () => {
     });
 
     it("is safe to run twice, in case an event is replayed past the event table", async () => {
-      const session = await order(10, 10, 2);
-      const first = await fulfilPayment(pool, { checkoutId: session.id, rateCentsPerTilePerMonth: RATE });
-      const second = await fulfilPayment(pool, { checkoutId: session.id, rateCentsPerTilePerMonth: RATE });
+      const session = await order(110, 110, 2);
+      const first = await fulfilPayment(pool, { checkoutId: session.id });
+      const second = await fulfilPayment(pool, { checkoutId: session.id });
 
       expect(first.status).toBe("fulfilled");
       expect(second.status).toBe("fulfilled");
@@ -166,33 +168,30 @@ suite("payments [requires DATABASE_URL]", () => {
      * the square, and only then did the money arrive.
      */
     it("refunds instead of delivering when the tiles were lost mid-payment", async () => {
-      const session = await createCheckout(pool, buyer, [{ x: 20, y: 20, size: 2 }], RATE, {
+      const session = await createCheckout(pool, buyer, [{ x: 120, y: 120, size: 2 }], {
         reservationMinutes: -1, // already lapsed
       });
 
       // The sweep frees it and a rival takes the square.
       await runReservationSweep(pool);
-      await claimBlock(pool, rival, { x: 20, y: 20, size: 2 });
+      await claimBlock(pool, rival, { x: 120, y: 120, size: 2 });
 
-      const result = await fulfilPayment(pool, {
-        checkoutId: session.id,
-        rateCentsPerTilePerMonth: RATE,
-      });
+      const result = await fulfilPayment(pool, { checkoutId: session.id });
 
       expect(result.status).toBe("nothing_delivered");
       expect(result.delivered).toHaveLength(0);
       expect(result.lost).toHaveLength(1);
-      expect(result.refundCents).toBe(4 * RATE);
+      expect(result.refundCents).toBe(priceOf(110, 110, 2));
 
       const owed = await outstandingRefunds(pool);
       expect(owed).toHaveLength(1);
       expect(owed[0]?.reason).toBe("tiles_lost");
-      expect(owed[0]?.amountCents).toBe(4 * RATE);
+      expect(owed[0]?.amountCents).toBe(priceOf(120, 120, 2));
 
       // The rival keeps the square: losing a race never takes it back.
       const winner = await pool.query<{ user_id: string }>(
         `SELECT b.user_id FROM occupied_tiles t JOIN blocks b ON b.id = t.block_id
-          WHERE t.x = 20 AND t.y = 20`,
+          WHERE t.x = 120 AND t.y = 120`,
       );
       expect(winner.rows[0]?.user_id).toBe(rival);
     });
@@ -202,35 +201,31 @@ suite("payments [requires DATABASE_URL]", () => {
         pool,
         buyer,
         [
-          { x: 30, y: 30, size: 2 },
-          { x: 40, y: 40, size: 1 },
+          { x: 130, y: 130, size: 2 },
+          { x: 140, y: 140, size: 1 },
         ],
-        RATE,
-      );
+              );
 
       // One square is quietly lost while the payment is in flight.
-      await pool.query(`DELETE FROM occupied_tiles WHERE x = 40 AND y = 40`);
-      await pool.query(`UPDATE blocks SET status = 'expired' WHERE x = 40 AND y = 40`);
+      await pool.query(`DELETE FROM occupied_tiles WHERE x = 140 AND y = 140`);
+      await pool.query(`UPDATE blocks SET status = 'expired' WHERE x = 140 AND y = 140`);
 
-      const result = await fulfilPayment(pool, {
-        checkoutId: session.id,
-        rateCentsPerTilePerMonth: RATE,
-      });
+      const result = await fulfilPayment(pool, { checkoutId: session.id });
 
       expect(result.status).toBe("partially_fulfilled");
       expect(result.delivered).toHaveLength(1);
       expect(result.lost).toHaveLength(1);
-      expect(result.refundCents).toBe(RATE);
+      expect(result.refundCents).toBe(priceOf(140, 140, 1));
     });
 
     it("does not owe the same refund twice when fulfilment repeats", async () => {
-      const session = await createCheckout(pool, buyer, [{ x: 50, y: 50, size: 1 }], RATE, {
+      const session = await createCheckout(pool, buyer, [{ x: 150, y: 150, size: 1 }], {
         reservationMinutes: -1,
       });
       await runReservationSweep(pool);
 
-      await fulfilPayment(pool, { checkoutId: session.id, rateCentsPerTilePerMonth: RATE });
-      await fulfilPayment(pool, { checkoutId: session.id, rateCentsPerTilePerMonth: RATE });
+      await fulfilPayment(pool, { checkoutId: session.id });
+      await fulfilPayment(pool, { checkoutId: session.id });
 
       expect(await outstandingRefunds(pool)).toHaveLength(1);
     });
@@ -238,7 +233,6 @@ suite("payments [requires DATABASE_URL]", () => {
     it("reports an order it has never heard of", async () => {
       const result = await fulfilPayment(pool, {
         checkoutId: "chk_00000000-0000-0000-0000-000000000000",
-        rateCentsPerTilePerMonth: RATE,
       });
       expect(result.status).toBe("unknown_checkout");
     });
@@ -246,11 +240,11 @@ suite("payments [requires DATABASE_URL]", () => {
 
   describe("refund settlement", () => {
     it("stays outstanding until a provider confirms it, and only settles once", async () => {
-      const session = await createCheckout(pool, buyer, [{ x: 60, y: 60, size: 1 }], RATE, {
+      const session = await createCheckout(pool, buyer, [{ x: 160, y: 160, size: 1 }], {
         reservationMinutes: -1,
       });
       await runReservationSweep(pool);
-      await fulfilPayment(pool, { checkoutId: session.id, rateCentsPerTilePerMonth: RATE });
+      await fulfilPayment(pool, { checkoutId: session.id });
 
       const [owed] = await outstandingRefunds(pool);
       if (owed === undefined) throw new Error("expected a refund to be owed");
@@ -264,11 +258,8 @@ suite("payments [requires DATABASE_URL]", () => {
 
   describe("review", () => {
     async function paidBlock(x: number, y: number, size: number): Promise<string> {
-      const session = await createCheckout(pool, buyer, [{ x, y, size }], RATE);
-      const result = await fulfilPayment(pool, {
-        checkoutId: session.id,
-        rateCentsPerTilePerMonth: RATE,
-      });
+      const session = await createCheckout(pool, buyer, [{ x, y, size }]);
+      const result = await fulfilPayment(pool, { checkoutId: session.id });
       const block = result.delivered[0];
       if (block === undefined) throw new Error("expected a delivered block");
       await fillListing(pool, block.id, `creator${x}x${y}`);
@@ -276,7 +267,7 @@ suite("payments [requires DATABASE_URL]", () => {
     }
 
     it("publishes an approved block and keeps its tiles", async () => {
-      const id = await paidBlock(10, 10, 2);
+      const id = await paidBlock(110, 110, 2);
       expect(await approveBlock(pool, id)).toEqual({ published: true });
 
 
@@ -290,27 +281,28 @@ suite("payments [requires DATABASE_URL]", () => {
     });
 
     it("releases the tiles and books a refund when a block is rejected", async () => {
-      const id = await paidBlock(10, 10, 2);
-      const result = await rejectBlock(pool, id, { rateCentsPerTilePerMonth: RATE });
+      const id = await paidBlock(110, 110, 2);
+      const result = await rejectBlock(pool, id);
 
-      expect(result).toEqual({ rejected: true, tilesReleased: 4, refundCents: 4 * RATE });
+      expect(result).toEqual({
+        rejected: true,
+        tilesReleased: 4,
+        refundCents: priceOf(110, 110, 2),
+      });
       expect(await countTiles(pool)).toBe(0);
 
       const owed = await outstandingRefunds(pool);
       expect(owed[0]?.reason).toBe("rejected_in_review");
 
       // And the square is immediately buyable again.
-      const replacement = await claimBlock(pool, rival, { x: 10, y: 10, size: 2 });
+      const replacement = await claimBlock(pool, rival, { x: 110, y: 110, size: 2 });
       expect(replacement.id).toBeDefined();
     });
 
     it("refuses to publish a listing with nothing to render", async () => {
       // Paid for, but the listing setup step never happened.
-      const session = await createCheckout(pool, buyer, [{ x: 80, y: 80, size: 1 }], RATE);
-      const result = await fulfilPayment(pool, {
-        checkoutId: session.id,
-        rateCentsPerTilePerMonth: RATE,
-      });
+      const session = await createCheckout(pool, buyer, [{ x: 180, y: 180, size: 1 }]);
+      const result = await fulfilPayment(pool, { checkoutId: session.id });
       const block = result.delivered[0];
       if (block === undefined) throw new Error("expected a delivered block");
 
@@ -321,8 +313,8 @@ suite("payments [requires DATABASE_URL]", () => {
     });
 
     it("will not reject something that was never in review", async () => {
-      const reserved = await claimBlock(pool, buyer, { x: 70, y: 70, size: 1 });
-      const result = await rejectBlock(pool, reserved.id, { rateCentsPerTilePerMonth: RATE });
+      const reserved = await claimBlock(pool, buyer, { x: 170, y: 170, size: 1 });
+      const result = await rejectBlock(pool, reserved.id);
       expect(result.rejected).toBe(false);
       expect(await outstandingRefunds(pool)).toHaveLength(0);
     });
@@ -330,10 +322,9 @@ suite("payments [requires DATABASE_URL]", () => {
 
   describe("subscriptions that stop paying", () => {
     async function liveBlock(x: number, y: number, size: number, subscriptionId: string, periodEnd: Date) {
-      const session = await createCheckout(pool, buyer, [{ x, y, size }], RATE);
+      const session = await createCheckout(pool, buyer, [{ x, y, size }]);
       const result = await fulfilPayment(pool, {
         checkoutId: session.id,
-        rateCentsPerTilePerMonth: RATE,
         subscriptionId,
         currentPeriodEnd: periodEnd,
       });
@@ -347,9 +338,9 @@ suite("payments [requires DATABASE_URL]", () => {
 
     it("frees every block a cancelled subscription was paying for", async () => {
       const future = new Date(Date.now() + 30 * 86_400_000);
-      await liveBlock(10, 10, 2, "sub_a", future);
-      await liveBlock(20, 20, 3, "sub_a", future);
-      await liveBlock(30, 30, 1, "sub_b", future);
+      await liveBlock(110, 110, 2, "sub_a", future);
+      await liveBlock(120, 120, 3, "sub_a", future);
+      await liveBlock(130, 130, 1, "sub_b", future);
 
       const result = await lapseSubscription(pool, "sub_a");
 
@@ -362,10 +353,10 @@ suite("payments [requires DATABASE_URL]", () => {
 
     it("refunds on lapse only when the policy asks for it", async () => {
       const future = new Date(Date.now() + 30 * 86_400_000);
-      await liveBlock(10, 10, 2, "sub_c", future);
+      await liveBlock(110, 110, 2, "sub_c", future);
 
-      const result = await lapseSubscription(pool, "sub_c", { refundCentsPerTile: RATE });
-      expect(result.refundCents).toBe(4 * RATE);
+      const result = await lapseSubscription(pool, "sub_c", { refundRemainder: true });
+      expect(result.refundCents).toBe(priceOf(110, 110, 2));
       expect((await outstandingRefunds(pool))[0]?.reason).toBe("subscription_lapsed");
     });
 
@@ -374,7 +365,7 @@ suite("payments [requires DATABASE_URL]", () => {
      * still cannot hold its square indefinitely.
      */
     it("sweeps up blocks whose paid period ended, past the grace period", async () => {
-      const id = await liveBlock(10, 10, 2, "sub_d", new Date(Date.now() + 86_400_000));
+      const id = await liveBlock(110, 110, 2, "sub_d", new Date(Date.now() + 86_400_000));
       await pool.query(`UPDATE blocks SET current_period_end = now() - interval '10 days' WHERE id = $1`, [id]);
 
       const result = await releaseLapsedSubscriptions(pool, 3);
@@ -385,7 +376,7 @@ suite("payments [requires DATABASE_URL]", () => {
     });
 
     it("leaves a block alone while it is still inside the grace period", async () => {
-      const id = await liveBlock(10, 10, 2, "sub_e", new Date(Date.now() + 86_400_000));
+      const id = await liveBlock(110, 110, 2, "sub_e", new Date(Date.now() + 86_400_000));
       await pool.query(`UPDATE blocks SET current_period_end = now() - interval '1 day' WHERE id = $1`, [id]);
 
       expect(await releaseLapsedSubscriptions(pool, 3)).toEqual({ blockIds: [], tilesReleased: 0 });
@@ -393,7 +384,7 @@ suite("payments [requires DATABASE_URL]", () => {
     });
 
     it("is idempotent, so the scheduled sweep can run as often as it likes", async () => {
-      const id = await liveBlock(10, 10, 1, "sub_f", new Date(Date.now() + 86_400_000));
+      const id = await liveBlock(110, 110, 1, "sub_f", new Date(Date.now() + 86_400_000));
       await pool.query(`UPDATE blocks SET current_period_end = now() - interval '10 days' WHERE id = $1`, [id]);
 
       await releaseLapsedSubscriptions(pool, 3);

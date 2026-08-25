@@ -7,7 +7,7 @@ import { claimBlocks } from "./board/claim.js";
 import { runReservationSweep } from "./board/cleanup.js";
 import { getCompositeBoard, invalidateCompositeBoard, localAvatarStore } from "./board/composite.js";
 import { ClaimError, TileConflictError } from "./board/errors.js";
-import { isValidSize } from "./board/geometry.js";
+import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
 import { lapseSubscription, releaseLapsedSubscriptions } from "./board/lifecycle.js";
@@ -25,18 +25,21 @@ import { availabilityBitmap, buildManifest, heldTileCount } from "./board/manife
 import { currentlyWatching, startWatchingTicker } from "./board/watching.js";
 import {
   BILLING_PERIOD,
+  BOARD_CENTER,
   BOARD_SIZE,
   FEATURED_MAX_DAYS,
   FEATURED_MIN_DAYS,
   FEATURED_SLOTS,
   MAX_BLOCK_SIZE,
+  ORBITS,
   TILE_COUNT,
   TILE_INSET,
   TILE_PIXELS,
+  UNIVERSE_RADIUS,
   featuredPriceCents,
   isValidFeaturedDays,
   monthlyPriceCents,
-  pricePerTileCentsPerMonth,
+  orbitAt,
 } from "./config.js";
 import { createPool } from "./db/client.js";
 import { seedBoard } from "./seed.js";
@@ -50,12 +53,6 @@ import { seedBoard } from "./seed.js";
 const PUBLIC_DIR = new URL("../public/", import.meta.url);
 const AVATAR_DIR = new URL("../var/avatars/", import.meta.url);
 const SCHEMA_FILE = new URL("../db/schema.sql", import.meta.url);
-
-/**
- * Until a real price is chosen, the UI shows this and says it is a placeholder.
- * Cents per tile per month.
- */
-const PLACEHOLDER_RATE_CENTS = 200;
 
 const url = process.env["DATABASE_URL"];
 if (url === undefined || url === "") {
@@ -203,16 +200,24 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     if (path === "/api/quote") {
       const size = Number(requestUrl.searchParams.get("size") ?? "1");
-      // Refuse to price something nobody can buy: a quote for a 26x26 would be
-      // a number the checkout could never honour.
+      const x = Number(requestUrl.searchParams.get("x") ?? "0");
+      const y = Number(requestUrl.searchParams.get("y") ?? "0");
+      // Refuse to price something nobody can buy: a quote for a 26x26, or for
+      // a spot out in the void, is a number checkout could never honour.
       if (!isValidSize(size)) {
         return sendJson(res, 400, {
           error: "invalid_size",
-          message: `Blocks run from 1x1 to ${MAX_BLOCK_SIZE}x${MAX_BLOCK_SIZE}.`,
+          message: `Planets run from 1x1 to ${MAX_BLOCK_SIZE}x${MAX_BLOCK_SIZE}.`,
           maxBlockSize: MAX_BLOCK_SIZE,
         });
       }
-      return sendJson(res, 200, quote(size));
+      if (!isInUniverse({ x, y, size })) {
+        return sendJson(res, 400, {
+          error: "outside_universe",
+          message: "Nothing out there is for sale.",
+        });
+      }
+      return sendJson(res, 200, quote(x, y, size));
     }
   }
 
@@ -324,11 +329,12 @@ async function stats(pool: Pool): Promise<unknown> {
     tilePixels: TILE_PIXELS,
     tileInset: TILE_INSET,
     boardSize: BOARD_SIZE,
+    boardCenter: BOARD_CENTER,
+    universeRadius: UNIVERSE_RADIUS,
     maxBlockSize: MAX_BLOCK_SIZE,
-    // For displaying a running total while a block is being dragged. The price
-    // actually charged is still computed server side at checkout, never sent up.
-    pricePerTileCentsPerMonth: tileRate().cents,
-    priceIsPlaceholder: tileRate().placeholder,
+    // The orbits, so the client can draw them and price a drag as it happens.
+    // What is actually charged is still computed server side at checkout.
+    orbits: ORBITS,
     billingPeriod: BILLING_PERIOD,
   };
 }
@@ -352,37 +358,21 @@ async function boardState(pool: Pool): Promise<unknown> {
 // ---------------------------------------------------------------------------
 
 /**
- * The per-tile monthly rate, falling back to the dev placeholder when none is
- * set. config.ts still refuses to invent a price; the fallback lives here, in
- * the dev harness, and every response says which one it used.
+ * What a planet at a given place would cost. Position matters as much as size
+ * now: the same square is five times the price in the core as in the outer
+ * reach, so a quote without coordinates would be meaningless.
  */
-function tileRate(): { cents: number; placeholder: boolean } {
-  try {
-    return { cents: pricePerTileCentsPerMonth(), placeholder: false };
-  } catch {
-    return { cents: PLACEHOLDER_RATE_CENTS, placeholder: true };
-  }
-}
-
-function quote(size: number): unknown {
-  try {
-    return {
-      size,
-      tiles: size * size,
-      monthlyCents: monthlyPriceCents(size),
-      billingPeriod: BILLING_PERIOD,
-      placeholder: false,
-    };
-  } catch {
-    return {
-      size,
-      tiles: size * size,
-      monthlyCents: size * size * PLACEHOLDER_RATE_CENTS,
-      billingPeriod: BILLING_PERIOD,
-      placeholder: true,
-      note: "PRICE_PER_TILE_CENTS_PER_MONTH is unset; this is a dev placeholder.",
-    };
-  }
+function quote(x: number, y: number, size: number): unknown {
+  const middle = Math.floor(size / 2);
+  return {
+    x,
+    y,
+    size,
+    tiles: size * size,
+    monthlyCents: monthlyPriceCents(x, y, size),
+    orbit: orbitAt(x + middle, y + middle)?.label ?? "Void",
+    billingPeriod: BILLING_PERIOD,
+  };
 }
 
 /**
@@ -399,11 +389,8 @@ async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void
     return badRequest(res, error);
   }
 
-  const rate = tileRate();
   try {
-    const session = await createCheckout(pool, devUserId, placements, rate.cents, {
-      rateIsPlaceholder: rate.placeholder,
-    });
+    const session = await createCheckout(pool, devUserId, placements);
     return sendJson(res, 201, session);
   } catch (error) {
     if (error instanceof TileConflictError) {
@@ -510,7 +497,6 @@ async function applyEvent(
   data: unknown,
 ): Promise<{ summary: string; body: Record<string, unknown> }> {
   const payload = (data ?? {}) as Record<string, unknown>;
-  const rate = tileRate();
 
   switch (eventType) {
     case "transaction.completed": {
@@ -521,7 +507,6 @@ async function applyEvent(
 
       const result = await fulfilPayment(pool, {
         checkoutId,
-        rateCentsPerTilePerMonth: rate.cents,
         subscriptionId: typeof payload["subscription_id"] === "string" ? payload["subscription_id"] : null,
         currentPeriodEnd: periodEnd(payload),
       });

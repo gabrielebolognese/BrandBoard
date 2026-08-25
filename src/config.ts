@@ -5,17 +5,106 @@
  * board_size() / max_block_size() in db/schema.sql; src/config.test.ts asserts
  * the two agree against a live database.
  */
-export const BOARD_SIZE = 100;
+export const BOARD_SIZE = 300;
 
 export const MIN_BLOCK_SIZE = 1;
 
 /**
- * Largest square anyone may buy, in tiles. A 25x25 is 625 tiles, 6.25% of the
- * board; the cap exists so no single buyer can corner the board. Below it, a
- * block may sit at any free (x, y) and the only other rule is that it cannot
- * overlap tiles someone already holds.
+ * Largest square anyone may buy, in tiles. The cap exists so no single buyer
+ * can corner the sky. Below it, a planet may sit at any free (x, y) and the
+ * only other rules are that it cannot overlap tiles someone already holds and
+ * must fit inside the universe.
  */
 export const MAX_BLOCK_SIZE = 25;
+
+// ---------------------------------------------------------------------------
+// Orbits
+// ---------------------------------------------------------------------------
+
+/**
+ * The universe is a disc, not a square, and it is priced by how close to the
+ * centre you are.
+ *
+ * Three orbits, charged per tile per month. The core is small and expensive,
+ * the outer ring is vast and cheap, and the board's square extent exists only
+ * because tiles are addressed by (x, y): everything outside UNIVERSE_RADIUS is
+ * void and cannot be bought.
+ */
+export const UNIVERSE_RADIUS = 150;
+
+/** Where the universe is centred, in tile coordinates. */
+export const BOARD_CENTER = BOARD_SIZE / 2;
+
+export interface Orbit {
+  readonly name: string;
+  readonly label: string;
+  /** Everything closer than this, and no closer than the previous orbit. */
+  readonly outerRadius: number;
+  readonly centsPerTilePerMonth: number;
+}
+
+export const ORBITS: readonly Orbit[] = [
+  { name: "core", label: "Core", outerRadius: 20, centsPerTilePerMonth: 500 },
+  { name: "inner", label: "Inner belt", outerRadius: 60, centsPerTilePerMonth: 300 },
+  { name: "outer", label: "Outer reach", outerRadius: UNIVERSE_RADIUS, centsPerTilePerMonth: 100 },
+];
+
+/** Distance from the centre of the universe to the centre of a tile. */
+export function distanceFromCenter(x: number, y: number): number {
+  const dx = x + 0.5 - BOARD_CENTER;
+  const dy = y + 0.5 - BOARD_CENTER;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** The orbit a tile sits in, or null when it is outside the universe. */
+export function orbitAt(x: number, y: number): Orbit | null {
+  const distance = distanceFromCenter(x, y);
+  for (const orbit of ORBITS) {
+    if (distance < orbit.outerRadius) return orbit;
+  }
+  return null;
+}
+
+/**
+ * What a planet costs each month: the sum of its tiles, each at the rate of the
+ * orbit it falls in.
+ *
+ * Summed per tile rather than taken from the planet's centre, because a planet
+ * spanning two orbits genuinely occupies expensive ground and cheap ground, and
+ * charging for the average of the two would let someone straddle the core at a
+ * discount.
+ */
+export function monthlyPriceCents(x: number, y: number, size: number): number {
+  let cents = 0;
+  for (let dx = 0; dx < size; dx += 1) {
+    for (let dy = 0; dy < size; dy += 1) {
+      cents += orbitAt(x + dx, y + dy)?.centsPerTilePerMonth ?? 0;
+    }
+  }
+  return cents;
+}
+
+/**
+ * Whether a planet fits inside the universe.
+ *
+ * The far corner is what decides it: a square is inside the disc only when its
+ * furthest corner from the centre is.
+ */
+export function fitsInUniverse(x: number, y: number, size: number): boolean {
+  const corners = [
+    [x, y],
+    [x + size, y],
+    [x, y + size],
+    [x + size, y + size],
+  ];
+  let furthest = 0;
+  for (const [cx, cy] of corners) {
+    const dx = (cx ?? 0) - BOARD_CENTER;
+    const dy = (cy ?? 0) - BOARD_CENTER;
+    furthest = Math.max(furthest, Math.sqrt(dx * dx + dy * dy));
+  }
+  return furthest <= UNIVERSE_RADIUS;
+}
 
 export const TILE_COUNT = BOARD_SIZE * BOARD_SIZE;
 
@@ -32,46 +121,21 @@ export const RESERVATION_TTL_MINUTES = 15;
 export const SUBSCRIPTION_GRACE_DAYS = 3;
 
 /**
- * Board pixels per tile, and the gap around each tile's square.
+ * Board pixels per tile, and the gap around each tile.
  *
- * A tile is drawn as a 20px square with a 1px border, with TILE_INSET of empty
- * ground on every side, so neighbouring squares sit 2 * TILE_INSET apart and
- * the grid reads as discrete cells rather than a hairline mesh.
- * BOARD_SIZE * TILE_PIXELS = 2400px composite.
+ * BOARD_SIZE * TILE_PIXELS = 3600px composite. Twelve rather than twenty four
+ * because the universe is now three hundred tiles across: at the old pitch the
+ * image would be 7200px square, which is past what is worth rendering or
+ * sending.
  */
-export const TILE_PIXELS = 24;
-export const TILE_INSET = 2;
+export const TILE_PIXELS = 12;
+export const TILE_INSET = 1;
 
-/** Side of the square actually drawn for a single tile: 24 - 2 - 2 = 20px. */
+/** Diameter of the planet drawn for a single tile: 12 - 1 - 1 = 10px. */
 export const TILE_SQUARE = TILE_PIXELS - 2 * TILE_INSET;
 
-/** Blocks are rented, not bought outright: the rate is per tile per month. */
+/** Planets are rented, not bought outright: every rate is per tile per month. */
 export const BILLING_PERIOD = "month" as const;
-
-/**
- * Flat rate per tile per month, in minor currency units. Deliberately has no
- * default: the price is a business decision that has not been made yet, and a
- * silent fallback would ship the wrong number to a real checkout.
- */
-export function pricePerTileCentsPerMonth(): number {
-  const raw = process.env["PRICE_PER_TILE_CENTS_PER_MONTH"];
-  const value = Number(raw);
-  if (raw === undefined || raw === "" || !Number.isInteger(value) || value <= 0) {
-    throw new Error(
-      "PRICE_PER_TILE_CENTS_PER_MONTH must be set to a positive integer number of " +
-        "cents, charged per tile per month.",
-    );
-  }
-  return value;
-}
-
-/**
- * The recurring monthly charge for one block. The only place a checkout price
- * may come from: derived from size on the server, never read from the client.
- */
-export function monthlyPriceCents(size: number): number {
-  return size * size * pricePerTileCentsPerMonth();
-}
 
 // ---------------------------------------------------------------------------
 // Featured slots

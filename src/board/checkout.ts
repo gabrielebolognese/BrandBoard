@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { BILLING_PERIOD, RESERVATION_TTL_MINUTES } from "../config.js";
+import { BILLING_PERIOD, RESERVATION_TTL_MINUTES, monthlyPriceCents, orbitAt } from "../config.js";
 import { claimBlocks } from "./claim.js";
 import type { Placement } from "./geometry.js";
 
@@ -12,9 +12,8 @@ import type { Placement } from "./geometry.js";
  * for tiles it had not secured would be quoting for squares someone else could
  * take before payment lands.
  *
- * The rate is passed in rather than read from config, so the caller has to be
- * explicit about where the number came from. A price is never taken from the
- * client: `size` is, and the money is derived from it here.
+ * A price is never taken from the client. The client sends where and how big,
+ * and the money is derived here from the orbits those tiles fall in.
  */
 
 export interface CheckoutLine {
@@ -24,6 +23,8 @@ export interface CheckoutLine {
   readonly size: number;
   readonly tiles: number;
   readonly monthlyCents: number;
+  /** The orbit the planet's centre sits in, for showing what was charged. */
+  readonly orbit: string;
 }
 
 export interface Checkout {
@@ -36,14 +37,11 @@ export interface Checkout {
   readonly lines: CheckoutLine[];
   readonly tiles: number;
   readonly monthlyTotalCents: number;
-  readonly rateCentsPerTilePerMonth: number;
   /** When the reservation lapses and the tiles go back on sale. */
   readonly expiresAt: Date;
 }
 
 export interface CheckoutOptions {
-  /** True when the rate is a dev stand-in rather than a decided price. */
-  readonly rateIsPlaceholder?: boolean;
   readonly reservationMinutes?: number;
 }
 
@@ -51,13 +49,8 @@ export async function createCheckout(
   pool: Pool,
   userId: string,
   placements: readonly Placement[],
-  rateCentsPerTilePerMonth: number,
   options: CheckoutOptions = {},
-): Promise<Checkout & { rateIsPlaceholder: boolean }> {
-  if (!Number.isInteger(rateCentsPerTilePerMonth) || rateCentsPerTilePerMonth <= 0) {
-    throw new Error("The per-tile monthly rate must be a positive integer number of cents.");
-  }
-
+): Promise<Checkout> {
   const id = `chk_${randomUUID()}`;
 
   // Reserve everything or nothing. A conflict throws TileConflictError straight
@@ -70,14 +63,15 @@ export async function createCheckout(
   });
 
   const lines: CheckoutLine[] = blocks.map((block) => {
-    const tiles = block.size * block.size;
+    const middle = Math.floor(block.size / 2);
     return {
       blockId: block.id,
       x: block.x,
       y: block.y,
       size: block.size,
-      tiles,
-      monthlyCents: tiles * rateCentsPerTilePerMonth,
+      tiles: block.size * block.size,
+      monthlyCents: monthlyPriceCents(block.x, block.y, block.size),
+      orbit: orbitAt(block.x + middle, block.y + middle)?.label ?? "Void",
     };
   });
 
@@ -96,9 +90,7 @@ export async function createCheckout(
     lines,
     tiles,
     monthlyTotalCents: lines.reduce((sum, line) => sum + line.monthlyCents, 0),
-    rateCentsPerTilePerMonth,
     expiresAt,
-    rateIsPlaceholder: options.rateIsPlaceholder === true,
   };
 }
 

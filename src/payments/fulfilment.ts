@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { monthlyPriceCents } from "../config.js";
 import { withTransaction } from "../db/client.js";
 import type { Queryable } from "../db/client.js";
 
@@ -40,7 +41,6 @@ export interface FulfilmentResult {
 
 export interface FulfilPaymentInput {
   readonly checkoutId: string;
-  readonly rateCentsPerTilePerMonth: number;
   readonly subscriptionId?: string | null;
   readonly currentPeriodEnd?: Date | null;
 }
@@ -54,7 +54,7 @@ export async function fulfilPayment(
   pool: Pool,
   input: FulfilPaymentInput,
 ): Promise<FulfilmentResult> {
-  const { checkoutId, rateCentsPerTilePerMonth } = input;
+  const { checkoutId } = input;
 
   return withTransaction(pool, async (tx) => {
     // Locking the rows keeps the reservation sweep off them: its cleanup uses
@@ -96,7 +96,7 @@ export async function fulfilPayment(
     const lost: BlockSummary[] = [];
 
     for (const row of blocks.rows) {
-      const summary = describe(row, rateCentsPerTilePerMonth);
+      const summary = describe(row);
       const holdsEverything = (heldTiles.get(row.id) ?? 0) === summary.tiles;
 
       if (row.status === "pending_review" || row.status === "live") {
@@ -143,20 +143,17 @@ export async function fulfilPayment(
   });
 }
 
-function describe(
-  row: { id: string; x: number; y: number; size: number },
-  rateCentsPerTilePerMonth: number,
-): BlockSummary {
-  const tiles = row.size * row.size;
+function describe(row: { id: string; x: number; y: number; size: number }): BlockSummary {
   return {
     id: row.id,
     x: row.x,
     y: row.y,
     size: row.size,
-    tiles,
-    // Derived here, never taken from the provider's payload: what we owe back
-    // is decided by what was bought, not by what a webhook claims was paid.
-    monthlyCents: tiles * rateCentsPerTilePerMonth,
+    tiles: row.size * row.size,
+    // Derived from where the planet is, never taken from the provider's
+    // payload: what we owe back is decided by what was bought, not by what a
+    // webhook claims was paid.
+    monthlyCents: monthlyPriceCents(row.x, row.y, row.size),
   };
 }
 

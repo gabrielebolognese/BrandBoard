@@ -1,6 +1,11 @@
 import type { Tile } from "./geometry.js";
 
-export type ClaimErrorCode = "invalid_size" | "out_of_bounds" | "tile_conflict" | "empty_claim";
+export type ClaimErrorCode =
+  | "invalid_size"
+  | "out_of_bounds"
+  | "outside_universe"
+  | "tile_conflict"
+  | "empty_claim";
 
 export abstract class ClaimError extends Error {
   abstract readonly code: ClaimErrorCode;
@@ -31,6 +36,21 @@ export class OutOfBoundsError extends ClaimError {
   ) {
     super(`A ${size}x${size} block at (${x}, ${y}) does not fit on the board.`);
     this.name = "OutOfBoundsError";
+  }
+}
+
+/** In bounds on the square board, but out in the void beyond the last orbit. */
+export class OutsideUniverseError extends ClaimError {
+  readonly code = "outside_universe";
+  readonly status = 400;
+
+  constructor(
+    readonly x: number,
+    readonly y: number,
+    readonly size: number,
+  ) {
+    super(`(${x}, ${y}) is outside the universe. Nothing out there is for sale.`);
+    this.name = "OutsideUniverseError";
   }
 }
 

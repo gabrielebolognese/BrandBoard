@@ -13,7 +13,12 @@ import {
 import { MAX_BLOCK_SIZE } from "../config.js";
 import { runReservationSweep } from "./cleanup.js";
 import { claimBlock, claimBlocks } from "./claim.js";
-import { InvalidSizeError, OutOfBoundsError, TileConflictError } from "./errors.js";
+import {
+  InvalidSizeError,
+  OutOfBoundsError,
+  OutsideUniverseError,
+  TileConflictError,
+} from "./errors.js";
 
 // Skipped, loudly, when DATABASE_URL is unset: these assertions are about what
 // PostgreSQL does under concurrency, and there is nothing to assert without it.
@@ -40,7 +45,7 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
 
   describe("a successful claim", () => {
     it("reserves the block and writes one tile row per covered tile", async () => {
-      const block = await claimBlock(pool, alice, { x: 12, y: 34, size: 3 });
+      const block = await claimBlock(pool, alice, { x: 112, y: 134, size: 3 });
 
       expect(await statusOf(pool, block.id)).toBe("reserved");
       expect(block.reservedUntil.getTime()).toBeGreaterThan(Date.now());
@@ -49,8 +54,8 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
     });
 
     it("places blocks at any free anchor, not on a size-aligned grid", async () => {
-      const first = await claimBlock(pool, alice, { x: 7, y: 3, size: 3 });
-      const second = await claimBlock(pool, bob, { x: 10, y: 4, size: 2 });
+      const first = await claimBlock(pool, alice, { x: 107, y: 103, size: 3 });
+      const second = await claimBlock(pool, bob, { x: 110, y: 104, size: 2 });
 
       expect(await tilesOf(pool, first.id)).toHaveLength(9);
       expect(await tilesOf(pool, second.id)).toHaveLength(4);
@@ -60,44 +65,52 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
 
   describe("large blocks, up to the cap", () => {
     it("claims a 12x12 and holds all 144 tiles", async () => {
-      const block = await claimBlock(pool, alice, { x: 20, y: 20, size: 12 });
+      const block = await claimBlock(pool, alice, { x: 120, y: 120, size: 12 });
       expect(await tilesOf(pool, block.id)).toHaveLength(144);
       expect(await countTiles(pool)).toBe(144);
     });
 
     it("claims a block at the cap and holds all 625 tiles", async () => {
-      const block = await claimBlock(pool, alice, { x: 10, y: 10, size: MAX_BLOCK_SIZE });
+      const block = await claimBlock(pool, alice, { x: 110, y: 110, size: MAX_BLOCK_SIZE });
       expect(await tilesOf(pool, block.id)).toHaveLength(625);
     });
 
     it("refuses anything past the cap, so no one can corner the board", async () => {
       await expect(
-        claimBlock(pool, alice, { x: 0, y: 0, size: MAX_BLOCK_SIZE + 1 }),
+        claimBlock(pool, alice, { x: 100, y: 100, size: MAX_BLOCK_SIZE + 1 }),
       ).rejects.toBeInstanceOf(InvalidSizeError);
       expect(await countTiles(pool)).toBe(0);
     });
 
     it("still cannot overlap, however large it is", async () => {
-      await claimBlock(pool, alice, { x: 50, y: 50, size: 1 });
+      await claimBlock(pool, alice, { x: 150, y: 150, size: 1 });
 
       // A 20x20 covering that single tile loses to it: size buys nothing.
-      await expect(claimBlock(pool, bob, { x: 40, y: 40, size: 20 })).rejects.toBeInstanceOf(
+      await expect(claimBlock(pool, bob, { x: 140, y: 140, size: 20 })).rejects.toBeInstanceOf(
         TileConflictError,
       );
       expect(await countTiles(pool)).toBe(1);
     });
 
     it("lets a big block fill the gap around what is already held", async () => {
-      await claimBlock(pool, alice, { x: 0, y: 0, size: 1 });
-      const big = await claimBlock(pool, bob, { x: 1, y: 1, size: 20 });
+      await claimBlock(pool, alice, { x: 100, y: 100, size: 1 });
+      const big = await claimBlock(pool, bob, { x: 101, y: 101, size: 20 });
       expect(await tilesOf(pool, big.id)).toHaveLength(400);
     });
   });
 
   describe("out of bounds", () => {
-    it("rejects a size 3 block at (98, 98) and writes nothing", async () => {
-      await expect(claimBlock(pool, alice, { x: 98, y: 98, size: 3 })).rejects.toBeInstanceOf(
+    it("rejects a planet that would run off the board and writes nothing", async () => {
+      await expect(claimBlock(pool, alice, { x: 298, y: 298, size: 3 })).rejects.toBeInstanceOf(
         OutOfBoundsError,
+      );
+      expect(await countTiles(pool)).toBe(0);
+    });
+
+    it("rejects a spot inside the square board but outside the universe", async () => {
+      // The corners of the addressable board are void: in bounds, not for sale.
+      await expect(claimBlock(pool, alice, { x: 2, y: 2, size: 1 })).rejects.toBeInstanceOf(
+        OutsideUniverseError,
       );
       expect(await countTiles(pool)).toBe(0);
     });
@@ -107,7 +120,7 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
       await expect(
         pool.query(
           `INSERT INTO blocks (user_id, x, y, size, status, reserved_until)
-           VALUES ($1, 98, 98, 3, 'reserved', now() + interval '15 minutes')`,
+           VALUES ($1, 298, 298, 3, 'reserved', now() + interval '15 minutes')`,
           [alice],
         ),
       ).rejects.toMatchObject({ constraint: "blocks_within_board" });
@@ -116,11 +129,11 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
 
   describe("collision", () => {
     it("returns 409 with the conflicting tiles when squares overlap", async () => {
-      await claimBlock(pool, alice, { x: 0, y: 0, size: 2 });
+      await claimBlock(pool, alice, { x: 100, y: 100, size: 2 });
 
       let caught: unknown;
       try {
-        await claimBlock(pool, bob, { x: 1, y: 1, size: 2 });
+        await claimBlock(pool, bob, { x: 101, y: 101, size: 2 });
       } catch (error) {
         caught = error;
       }
@@ -129,13 +142,13 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
       const conflict = caught as TileConflictError;
       expect(conflict.status).toBe(409);
       // Only the shared corner is taken; the other three tiles were free.
-      expect(conflict.conflicts.map((c) => ({ x: c.x, y: c.y }))).toEqual([{ x: 1, y: 1 }]);
+      expect(conflict.conflicts.map((c) => ({ x: c.x, y: c.y }))).toEqual([{ x: 101, y: 101 }]);
       expect(await countTiles(pool)).toBe(4);
     });
 
     it("does not relocate or partially place the losing block", async () => {
-      await claimBlock(pool, alice, { x: 5, y: 5, size: 1 });
-      await claimBlocks(pool, bob, [{ x: 5, y: 5, size: 1 }]).catch(() => undefined);
+      await claimBlock(pool, alice, { x: 105, y: 105, size: 1 });
+      await claimBlocks(pool, bob, [{ x: 105, y: 105, size: 1 }]).catch(() => undefined);
 
       const blocks = await pool.query<{ count: string }>(
         `SELECT count(*) FROM blocks WHERE user_id = $1`,
@@ -148,26 +161,26 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
     it("rejects a cart that overlaps itself", async () => {
       await expect(
         claimBlocks(pool, alice, [
-          { x: 20, y: 20, size: 2 },
-          { x: 21, y: 21, size: 2 },
+          { x: 120, y: 120, size: 2 },
+          { x: 121, y: 121, size: 2 },
         ]),
       ).rejects.toBeInstanceOf(TileConflictError);
       expect(await countTiles(pool)).toBe(0);
     });
 
     it("is all-or-nothing across a cart: one bad square drops the whole claim", async () => {
-      await claimBlock(pool, alice, { x: 5, y: 5, size: 1 });
+      await claimBlock(pool, alice, { x: 105, y: 105, size: 1 });
 
       await expect(
         claimBlocks(pool, bob, [
-          { x: 40, y: 40, size: 2 }, // free
-          { x: 5, y: 5, size: 1 }, // taken
+          { x: 140, y: 140, size: 2 }, // free
+          { x: 105, y: 105, size: 1 }, // taken
         ]),
       ).rejects.toBeInstanceOf(TileConflictError);
 
       // (40, 40) must still be free, or the cart leaked a partial reservation.
       expect(await countTiles(pool)).toBe(1);
-      const retry = await claimBlock(pool, bob, { x: 40, y: 40, size: 2 });
+      const retry = await claimBlock(pool, bob, { x: 140, y: 140, size: 2 });
       expect(await tilesOf(pool, retry.id)).toHaveLength(4);
     });
   });
@@ -183,12 +196,12 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
         await a.query("BEGIN");
         await b.query("BEGIN");
 
-        const blockA = await insertReservedBlock(a, alice, 50, 50, 3);
-        const blockB = await insertReservedBlock(b, bob, 51, 51, 3);
+        const blockA = await insertReservedBlock(a, alice, 150, 150, 3);
+        const blockB = await insertReservedBlock(b, bob, 151, 151, 3);
 
-        await insertTiles(a, blockA, 50, 50, 3);
+        await insertTiles(a, blockA, 150, 150, 3);
         // Not awaited: this blocks inside PostgreSQL until A commits or aborts.
-        const contended = insertTiles(b, blockB, 51, 51, 3);
+        const contended = insertTiles(b, blockB, 151, 151, 3);
         await sleep(250);
 
         await a.query("COMMIT");
@@ -212,10 +225,10 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
       // 20 rounds at fresh coordinates. Whichever way the two land, the board
       // must end up holding exactly one block's worth of tiles.
       for (let round = 0; round < 20; round += 1) {
-        const x = round * 4;
+        const x = 120 + round * 4;
         const results = await Promise.allSettled([
-          claimBlock(pool, alice, { x, y: 0, size: 2 }),
-          claimBlock(pool, bob, { x: x + 1, y: 1, size: 2 }),
+          claimBlock(pool, alice, { x, y: 150, size: 2 }),
+          claimBlock(pool, bob, { x: x + 1, y: 151, size: 2 }),
         ]);
 
         const winners = results.filter((r) => r.status === "fulfilled");
@@ -240,7 +253,7 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
 
   describe("reservations that lapse", () => {
     it("frees its tiles once the hold has passed, and the square can be claimed again", async () => {
-      const abandoned = await claimBlock(pool, alice, { x: 60, y: 60, size: 2 });
+      const abandoned = await claimBlock(pool, alice, { x: 160, y: 160, size: 2 });
 
       // 16 minutes pass without payment.
       await pool.query(
@@ -248,7 +261,7 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
         [abandoned.id],
       );
 
-      const replacement = await claimBlock(pool, bob, { x: 60, y: 60, size: 2 });
+      const replacement = await claimBlock(pool, bob, { x: 160, y: 160, size: 2 });
 
       expect(await statusOf(pool, abandoned.id)).toBe("expired");
       expect(await tilesOf(pool, abandoned.id)).toHaveLength(0);
@@ -260,7 +273,7 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
       const abandoned = await claimBlock(
         pool,
         alice,
-        { x: 70, y: 70, size: 2 },
+        { x: 170, y: 170, size: 2 },
         { reservationMinutes: -1 },
       );
       expect(await countTiles(pool)).toBe(4);
@@ -278,7 +291,7 @@ suite("claiming blocks [requires DATABASE_URL]", () => {
     });
 
     it("leaves a hold that has not lapsed alone", async () => {
-      const live = await claimBlock(pool, alice, { x: 80, y: 80, size: 1 });
+      const live = await claimBlock(pool, alice, { x: 180, y: 180, size: 1 });
 
       const sweep = await runReservationSweep(pool);
 

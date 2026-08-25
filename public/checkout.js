@@ -16,7 +16,7 @@
 import { messageFrom, postJson } from "./http.js";
 import { createModal } from "./modal.js";
 
-export function createCheckout({ rate, onChange, onReserved, onConflict }) {
+export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
   let items = [];
   let session = null;
   let step = "review";
@@ -110,7 +110,7 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
       return;
     }
 
-    const total = items.reduce((sum, i) => sum + i.size * i.size * rate().cents, 0);
+    const total = items.reduce((sum, i) => sum + priceOf(i), 0);
     launcher.innerHTML =
       `<span class="cart-count">${items.length}</span>` +
       `<span>${items.length === 1 ? "block" : "blocks"} selected</span>` +
@@ -196,11 +196,10 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
 
   function renderReview() {
     modal.setTitle("Your order");
-    const { cents, placeholder } = rate();
     const lines = items.map((item) => ({
       ...item,
       tiles: item.size * item.size,
-      monthlyCents: item.size * item.size * cents,
+      monthlyCents: priceOf(item),
     }));
     const total = lines.reduce((sum, line) => sum + line.monthlyCents, 0);
 
@@ -209,7 +208,6 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     modal.body.append(totals(lines, total, { indicative: true }));
 
     modal.footer.textContent = "";
-    if (placeholder) modal.footer.append(notice("Prices are placeholders until a rate is set."));
 
     const reserve = button("primary", "Reserve orbit and continue");
     reserve.addEventListener("click", () => void doReserve(reserve));

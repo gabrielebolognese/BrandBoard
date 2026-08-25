@@ -8,7 +8,7 @@ import { createCheckout } from "./checkout.js";
 import { getJson, postJson } from "./http.js";
 import { createFeaturedColumn } from "./featured.js";
 
-const BOARD = 100;
+let BOARD = 300;
 
 /**
  * Tile geometry, taken from the server so config.ts stays the single source.
@@ -36,7 +36,8 @@ const badge = document.getElementById("badge");
 const toastEl = document.getElementById("toast");
 
 let blocks = [];
-const owner = new Int16Array(BOARD * BOARD).fill(-1);
+// Int32: a 300x300 universe has 90,000 tiles, past what Int16 can index.
+let owner = new Int32Array(BOARD * BOARD).fill(-1);
 let held = new Uint8Array(BOARD * BOARD);
 
 let composite = null;
@@ -50,8 +51,9 @@ let selection = null;
 let flashes = [];
 let dirty = true;
 
-let rateCentsPerMonth = 0;
-let priceIsPlaceholder = false;
+let orbits = [];
+let universeRadius = 150;
+let boardCenter = 150;
 let maxBlockSize = 25;
 
 const detailCache = new Map();
@@ -66,9 +68,15 @@ async function loadStats() {
   if (!ok || stats === null) return;
   TILE = stats.tilePixels;
   INSET = stats.tileInset;
+  if (stats.boardSize !== BOARD) {
+    BOARD = stats.boardSize;
+    owner = new Int32Array(BOARD * BOARD).fill(-1);
+    held = new Uint8Array(BOARD * BOARD);
+  }
   PX = BOARD * TILE;
-  rateCentsPerMonth = stats.pricePerTileCentsPerMonth;
-  priceIsPlaceholder = stats.priceIsPlaceholder;
+  orbits = stats.orbits;
+  universeRadius = stats.universeRadius;
+  boardCenter = stats.boardCenter;
   maxBlockSize = stats.maxBlockSize;
   document.getElementById("stat-available").textContent = stats.tilesAvailable.toLocaleString();
   document.getElementById("stat-live").textContent = stats.blocksLive.toLocaleString();
@@ -174,7 +182,7 @@ function isFree(square) {
       if (held[(square.y + dy) * BOARD + (square.x + dx)] === 1) return false;
     }
   }
-  return !checkout.claims(square);
+  return inUniverse(square) && !checkout.claims(square);
 }
 
 /** The square currently under the cursor: dragged size, or 1x1 when hovering. */
@@ -402,6 +410,90 @@ function disc(square, color) {
 }
 
 /**
+ * The orbits themselves: three rings marking where the price changes.
+ *
+ * This is what replaced the grid. A grid told you where the squares were; the
+ * rings tell you what a square costs, which is the thing worth knowing when
+ * every tile is the same shape but not the same price.
+ */
+/** One colour per orbit, so which band you are in is legible at a glance. */
+const ORBIT_AURA = [
+  { rgb: "168, 85, 247", peak: 0.13 }, // core: purple
+  { rgb: "96, 165, 250", peak: 0.09 }, // inner belt: blue
+  { rgb: "226, 234, 250", peak: 0.05 }, // outer reach: white
+];
+
+/**
+ * A soft band of colour hugging the inside of each ring.
+ *
+ * Drawn before the planet sheet on purpose: the aura is the ground the worlds
+ * sit on, not a wash over them, so nothing it does can tint a planet. Kept very
+ * low in alpha, since it has to be readable behind a starfield without
+ * competing with it.
+ */
+function drawAuras(seconds) {
+  const cx = originX + boardCenter * TILE * scale;
+  const cy = originY + boardCenter * TILE * scale;
+
+  // Largest first, so the inner bands layer over the outer ones.
+  for (let i = orbits.length - 1; i >= 0; i -= 1) {
+    const orbit = orbits[i];
+    const aura = ORBIT_AURA[i] ?? ORBIT_AURA[ORBIT_AURA.length - 1];
+    const outer = orbit.outerRadius * TILE * scale;
+    if (outer < 6) continue;
+
+    const inner = i === 0 ? 0 : orbits[i - 1].outerRadius * TILE * scale;
+    const breath = 0.86 + 0.14 * Math.sin(seconds * 0.4 + i * 1.3);
+    const peak = aura.peak * breath;
+
+    const gradient = ctx.createRadialGradient(cx, cy, Math.max(0, inner), cx, cy, outer);
+    gradient.addColorStop(0, `rgba(${aura.rgb}, 0)`);
+    gradient.addColorStop(0.55, `rgba(${aura.rgb}, ${(peak * 0.28).toFixed(4)})`);
+    gradient.addColorStop(0.92, `rgba(${aura.rgb}, ${peak.toFixed(4)})`);
+    gradient.addColorStop(1, `rgba(${aura.rgb}, 0)`);
+
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(cx, cy, outer, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawOrbits(rect, seconds) {
+  const cx = originX + boardCenter * TILE * scale;
+  const cy = originY + boardCenter * TILE * scale;
+
+  ctx.save();
+  for (let i = 0; i < orbits.length; i += 1) {
+    const orbit = orbits[i];
+    const radius = orbit.outerRadius * TILE * scale;
+    if (radius < 8) continue;
+
+    // The ring itself in its own colour, a shade brighter than its aura.
+    const aura = ORBIT_AURA[i] ?? ORBIT_AURA[ORBIT_AURA.length - 1];
+    const drift = 0.5 + 0.5 * Math.sin(seconds * 0.35 + i);
+    ctx.strokeStyle = `rgba(${aura.rgb}, ${(0.3 + 0.16 * drift).toFixed(3)})`;
+    ctx.lineWidth = i === orbits.length - 1 ? 1.5 : 1;
+    ctx.setLineDash(i === orbits.length - 1 ? [] : [6, 8]);
+    ctx.lineDashOffset = seconds * (i % 2 === 0 ? -6 : 6);
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // The rate, written on the ring where there is room for it.
+    if (radius > 60 && radius < Math.max(rect.width, rect.height) * 1.6) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = `rgba(${aura.rgb}, 0.62)`;
+      ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      const label = `${orbit.label} · $${(orbit.centsPerTilePerMonth / 100).toFixed(0)}/tile`;
+      ctx.fillText(label, cx, cy - radius - 7);
+    }
+  }
+  ctx.restore();
+}
+
+/**
  * The tile grid, shown only while a claim is being placed.
  *
  * A universe with a grid painted permanently over it is just a spreadsheet, but
@@ -451,6 +543,8 @@ function draw() {
   drawNebulae();
   drawStars(rect, seconds);
 
+  drawAuras(seconds);
+  drawOrbits(rect, seconds);
   if (selection !== null) drawPlacementGrid(rect);
   drawHalos(rect, seconds);
 
@@ -559,17 +653,18 @@ function showBadge(square, clientX, clientY) {
   const free = isFree(square);
   // Display only, and it works for any size because it is derived from the
   // per-tile rate rather than a fixed list of purchasable sizes.
-  const tiles = square.size * square.size;
-  const amount = ((tiles * rateCentsPerMonth) / 100).toLocaleString(undefined, {
+  const amount = (priceOf(square) / 100).toLocaleString(undefined, {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
   });
 
+  const middle = Math.floor(square.size / 2);
+  const orbit = orbitAt(square.x + middle, square.y + middle);
+  const where = orbit === null ? "the void" : orbit.label;
   const capped = square.size >= maxBlockSize ? " &middot; max" : "";
   badge.innerHTML =
-    `${square.size}x${square.size} <small>${amount}/mo` +
-    `${priceIsPlaceholder ? "*" : ""}${capped}</small>`;
+    `${square.size}x${square.size} <small>${amount}/mo &middot; ${where}${capped}</small>`;
   badge.className = free ? "badge" : "badge blocked";
   badge.hidden = false;
   badge.style.left = `${Math.min(clientX + 16, window.innerWidth - 120)}px`;
@@ -849,7 +944,7 @@ const featured = createFeaturedColumn({
 });
 
 const checkout = createCheckout({
-  rate: () => ({ cents: rateCentsPerMonth, placeholder: priceIsPlaceholder }),
+  priceOf,
   onChange: () => {
     dirty = true;
   },

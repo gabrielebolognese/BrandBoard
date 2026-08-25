@@ -1,4 +1,4 @@
-import { BOARD_SIZE, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE } from "../config.js";
+import { BOARD_SIZE, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, fitsInUniverse } from "../config.js";
 
 export interface Tile {
   readonly x: number;
@@ -28,6 +28,17 @@ export function isInBounds(placement: Placement): boolean {
   const { x, y, size } = placement;
   if (!Number.isInteger(x) || !Number.isInteger(y)) return false;
   return x >= 0 && y >= 0 && x + size <= BOARD_SIZE && y + size <= BOARD_SIZE;
+}
+
+/**
+ * Inside the disc, not merely inside the square that contains it.
+ *
+ * The addressable board is a square because tiles are addressed by (x, y), but
+ * the universe inside it is round. A planet out in the corners is in bounds and
+ * still cannot be bought.
+ */
+export function isInUniverse(placement: Placement): boolean {
+  return isInBounds(placement) && fitsInUniverse(placement.x, placement.y, placement.size);
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { SUBSCRIPTION_GRACE_DAYS } from "../config.js";
+import { SUBSCRIPTION_GRACE_DAYS, monthlyPriceCents } from "../config.js";
 import { withTransaction } from "../db/client.js";
 import type { Queryable } from "../db/client.js";
 import { recordRefund } from "../payments/fulfilment.js";
@@ -82,16 +82,17 @@ export async function approveBlock(
 export async function rejectBlock(
   pool: Pool,
   blockId: string,
-  options: { rateCentsPerTilePerMonth: number },
 ): Promise<{ rejected: boolean; tilesReleased: number; refundCents: number }> {
   return withTransaction(pool, async (tx) => {
     const found = await tx.query<{
       id: string;
+      x: number;
+      y: number;
       size: number;
       status: string;
       checkout_session_id: string | null;
     }>(
-      `SELECT id, size, status, checkout_session_id
+      `SELECT id, x, y, size, status, checkout_session_id
          FROM blocks
         WHERE id = $1
         FOR UPDATE`,
@@ -108,7 +109,7 @@ export async function rejectBlock(
     ]);
     const released = await releaseTiles(tx, [blockId]);
 
-    const refundCents = block.size * block.size * options.rateCentsPerTilePerMonth;
+    const refundCents = monthlyPriceCents(block.x, block.y, block.size);
     await recordRefund(tx, {
       blockId,
       checkoutId: block.checkout_session_id,
@@ -126,12 +127,12 @@ export async function rejectBlock(
  *
  * No refund by default: a cancellation normally means the buyer keeps what they
  * already paid for until the period ends, and this is called when it has. Pass
- * refundCentsPerTile only for a policy that gives money back mid-period.
+ * refundRemainder only for a policy that gives money back mid-period.
  */
 export async function lapseSubscription(
   pool: Pool,
   subscriptionId: string,
-  options: { refundCentsPerTile?: number } = {},
+  options: { refundRemainder?: boolean } = {},
 ): Promise<{ blocks: BlockChange[]; tilesReleased: number; refundCents: number }> {
   return withTransaction(pool, async (tx) => {
     const found = await tx.query<{ id: string; x: number; y: number; size: number; checkout_session_id: string | null }>(
@@ -153,9 +154,9 @@ export async function lapseSubscription(
     const released = await releaseTiles(tx, ids);
 
     let refundCents = 0;
-    if (options.refundCentsPerTile !== undefined) {
+    if (options.refundRemainder === true) {
       for (const row of found.rows) {
-        const amount = row.size * row.size * options.refundCentsPerTile;
+        const amount = monthlyPriceCents(row.x, row.y, row.size);
         refundCents += amount;
         await recordRefund(tx, {
           blockId: row.id,

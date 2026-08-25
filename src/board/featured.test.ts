@@ -78,7 +78,7 @@ suite("featured windows [requires DATABASE_URL]", () => {
   }
 
   it("runs 24 hours from the moment it is bought", async () => {
-    const block = await liveBlock(0, 0, "one");
+    const block = await liveBlock(100, 100, "one");
     const slot = await featureBlock(pool, block, 1);
 
     const hours = (slot.expiresAt.getTime() - Date.now()) / 3_600_000;
@@ -91,8 +91,8 @@ suite("featured windows [requires DATABASE_URL]", () => {
    * hours apart. Nothing resets at a shared boundary.
    */
   it("gives every purchase its own clock rather than a shared reset", async () => {
-    const first = await liveBlock(0, 0, "first");
-    const second = await liveBlock(10, 10, "second");
+    const first = await liveBlock(100, 100, "first");
+    const second = await liveBlock(110, 110, "second");
 
     // Bought five hours ago, so it has 19 hours left of its 24.
     await pool.query(
@@ -122,7 +122,7 @@ suite("featured windows [requires DATABASE_URL]", () => {
   });
 
   it("honours a multi-day purchase", async () => {
-    const block = await liveBlock(0, 0, "long");
+    const block = await liveBlock(100, 100, "long");
     const slot = await featureBlock(pool, block, 10);
 
     const days = (slot.expiresAt.getTime() - Date.now()) / 86_400_000;
@@ -132,7 +132,7 @@ suite("featured windows [requires DATABASE_URL]", () => {
   });
 
   it("drops out of the column the moment its window closes", async () => {
-    const block = await liveBlock(0, 0, "lapsed");
+    const block = await liveBlock(100, 100, "lapsed");
     await pool.query(
       `INSERT INTO featured_slots (block_id, days, price_cents, starts_at, expires_at)
        VALUES ($1, 1, $2, now() - interval '25 hours', now() - interval '1 hour')`,
@@ -144,7 +144,7 @@ suite("featured windows [requires DATABASE_URL]", () => {
   });
 
   it("lets one block hold several windows at once", async () => {
-    const block = await liveBlock(0, 0, "double");
+    const block = await liveBlock(100, 100, "double");
     await featureBlock(pool, block, 1);
     await featureBlock(pool, block, 3);
 
@@ -154,7 +154,7 @@ suite("featured windows [requires DATABASE_URL]", () => {
   });
 
   it("refuses a day count outside the range, before touching the database", async () => {
-    const block = await liveBlock(0, 0, "bad");
+    const block = await liveBlock(100, 100, "bad");
     await expect(featureBlock(pool, block, 11)).rejects.toBeInstanceOf(InvalidFeaturedDaysError);
     await expect(featureBlock(pool, block, 0)).rejects.toBeInstanceOf(InvalidFeaturedDaysError);
     expect(await activeFeatured(pool)).toHaveLength(0);
@@ -171,14 +171,14 @@ suite("featured windows [requires DATABASE_URL]", () => {
   it("refuses to feature a block that is not on the board yet", async () => {
     // Reserved, not live: featuring it would charge for a slot the column
     // filters out, so it would be paid for and never shown.
-    const reserved = await claimBlock(pool, owner, { x: 60, y: 60, size: 1 });
+    const reserved = await claimBlock(pool, owner, { x: 160, y: 160, size: 1 });
     await expect(featureBlock(pool, reserved.id, 1)).rejects.toBeInstanceOf(BlockNotLiveError);
     expect(await activeFeatured(pool)).toHaveLength(0);
   });
 
   it("shows the newest purchases first, capped at the number of slots", async () => {
     for (let i = 0; i < 7; i += 1) {
-      const block = await liveBlock(i * 3, 40, `creator${i}`);
+      const block = await liveBlock(120 + i * 3, 140, `creator${i}`);
       await featureBlock(pool, block, 1);
     }
     const active = await activeFeatured(pool);

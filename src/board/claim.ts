@@ -7,10 +7,18 @@ import {
   EmptyClaimError,
   InvalidSizeError,
   OutOfBoundsError,
+  OutsideUniverseError,
   TileConflictError,
 } from "./errors.js";
 import type { ConflictingTile } from "./errors.js";
-import { isInBounds, isValidSize, placementsOverlap, tileKey, tilesForBlock } from "./geometry.js";
+import {
+  isInBounds,
+  isInUniverse,
+  isValidSize,
+  placementsOverlap,
+  tileKey,
+  tilesForBlock,
+} from "./geometry.js";
 import type { Placement, Tile } from "./geometry.js";
 
 export interface ClaimedBlock {
@@ -110,6 +118,9 @@ function validateClaim(placements: readonly Placement[]): void {
     if (!isValidSize(placement.size)) throw new InvalidSizeError(placement.size, MAX_BLOCK_SIZE);
     if (!isInBounds(placement)) {
       throw new OutOfBoundsError(placement.x, placement.y, placement.size);
+    }
+    if (!isInUniverse(placement)) {
+      throw new OutsideUniverseError(placement.x, placement.y, placement.size);
     }
   }
 

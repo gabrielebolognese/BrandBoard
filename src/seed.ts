@@ -4,7 +4,7 @@ import { claimBlock } from "./board/claim.js";
 import { avatarPixelsFor, generateAvatar } from "./board/avatar.js";
 import { invalidateCompositeBoard } from "./board/composite.js";
 import { TileConflictError } from "./board/errors.js";
-import { BOARD_SIZE, featuredPriceCents } from "./config.js";
+import { BOARD_CENTER, UNIVERSE_RADIUS, featuredPriceCents, fitsInUniverse } from "./config.js";
 
 /**
  * Fills the board with plausible fake listings so the rendering work has
@@ -50,7 +50,7 @@ export interface SeedResult {
 export async function seedBoard(
   pool: Pool,
   avatarDir: URL,
-  target = 240,
+  target = 420,
   seed = 20260824,
 ): Promise<SeedResult> {
   await mkdir(avatarDir, { recursive: true });
@@ -67,9 +67,11 @@ export async function seedBoard(
     attempts += 1;
 
     const size = pickSize(random);
-    // Biased toward the middle, the way a real board fills from its centre out.
-    const x = clampAnchor(gaussian(random, BOARD_SIZE / 2, BOARD_SIZE / 4.2), size);
-    const y = clampAnchor(gaussian(random, BOARD_SIZE / 2, BOARD_SIZE / 4.2), size);
+    // Somewhere in the disc, packed toward the core and thinning outwards, the
+    // way a universe priced by proximity would actually fill.
+    const spot = pickSpot(random, size);
+    if (spot === null) continue;
+    const { x, y } = spot;
 
     const first = pick(random, FIRST);
     const last = pick(random, LAST);
@@ -226,9 +228,24 @@ function gaussian(random: () => number, mean: number, spread: number): number {
   return mean + normal * spread;
 }
 
-function clampAnchor(value: number, size: number): number {
-  const max = BOARD_SIZE - size;
-  return Math.min(Math.max(Math.round(value), 0), max);
+/**
+ * A free-ish anchor inside the disc.
+ *
+ * Radius is drawn from a square root of a biased roll, which concentrates
+ * planets near the centre without leaving the outer reach empty: the core is
+ * five times the price and should look like it is worth it.
+ */
+function pickSpot(random: () => number, size: number): { x: number; y: number } | null {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const angle = random() * Math.PI * 2;
+    const bias = random() ** 2.1;
+    const radius = Math.sqrt(bias) * (UNIVERSE_RADIUS - size - 1);
+    const x = Math.round(BOARD_CENTER + Math.cos(angle) * radius) - Math.floor(size / 2);
+    const y = Math.round(BOARD_CENTER + Math.sin(angle) * radius) - Math.floor(size / 2);
+    if (x < 0 || y < 0) continue;
+    if (fitsInUniverse(x, y, size)) return { x, y };
+  }
+  return null;
 }
 
 function uniqueHandle(base: string, used: Set<string>): string {

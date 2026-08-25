@@ -36,28 +36,28 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
 
   describe("occupied_tiles", () => {
     it("makes a double booking impossible at the storage layer", async () => {
-      const first = await reserve(pool, alice, 3, 3, 1);
-      const second = await reserve(pool, alice, 4, 4, 1);
+      const first = await reserve(pool, alice, 103, 103, 1);
+      const second = await reserve(pool, alice, 104, 104, 1);
 
-      await pool.query(`INSERT INTO occupied_tiles (x, y, block_id) VALUES (3, 3, $1)`, [first]);
+      await pool.query(`INSERT INTO occupied_tiles (x, y, block_id) VALUES (103, 103, $1)`, [first]);
 
       await expect(
-        pool.query(`INSERT INTO occupied_tiles (x, y, block_id) VALUES (3, 3, $1)`, [second]),
+        pool.query(`INSERT INTO occupied_tiles (x, y, block_id) VALUES (103, 103, $1)`, [second]),
       ).rejects.toMatchObject({ code: "23505", constraint: "occupied_tiles_pkey" });
     });
 
     it("releases tiles when its block is deleted, which is what a rejection does", async () => {
-      const block = await reserve(pool, alice, 8, 8, 1);
-      await pool.query(`INSERT INTO occupied_tiles (x, y, block_id) VALUES (8, 8, $1)`, [block]);
+      const block = await reserve(pool, alice, 108, 108, 1);
+      await pool.query(`INSERT INTO occupied_tiles (x, y, block_id) VALUES (108, 108, $1)`, [block]);
 
       await pool.query(`DELETE FROM blocks WHERE id = $1`, [block]);
 
-      const left = await pool.query(`SELECT 1 FROM occupied_tiles WHERE x = 8 AND y = 8`);
+      const left = await pool.query(`SELECT 1 FROM occupied_tiles WHERE x = 108 AND y = 108`);
       expect(left.rowCount).toBe(0);
     });
 
     it("refuses coordinates off the board", async () => {
-      const block = await reserve(pool, alice, 0, 0, 1);
+      const block = await reserve(pool, alice, 100, 100, 1);
       await expect(
         pool.query(`INSERT INTO occupied_tiles (x, y, block_id) VALUES ($1, 0, $2)`, [
           BOARD_SIZE,
@@ -69,29 +69,35 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
 
   describe("blocks", () => {
     it("refuses a size below one", async () => {
-      await expect(reserve(pool, alice, 0, 0, 0)).rejects.toMatchObject({
+      await expect(reserve(pool, alice, 100, 100, 0)).rejects.toMatchObject({
         constraint: "blocks_size_range",
       });
     });
 
     it("refuses a block larger than the cap, even where it would fit", async () => {
-      await expect(reserve(pool, alice, 0, 0, MAX_BLOCK_SIZE + 1)).rejects.toMatchObject({
+      await expect(reserve(pool, alice, 100, 100, MAX_BLOCK_SIZE + 1)).rejects.toMatchObject({
         constraint: "blocks_size_range",
       });
     });
 
     it("accepts a block right at the cap", async () => {
-      await expect(reserve(pool, alice, 10, 10, MAX_BLOCK_SIZE)).resolves.toBeDefined();
+      await expect(reserve(pool, alice, 110, 110, MAX_BLOCK_SIZE)).resolves.toBeDefined();
     });
 
-    it("still refuses a block that runs off the edge, at any size", async () => {
-      await expect(reserve(pool, alice, 90, 0, 11)).rejects.toMatchObject({
-        constraint: "blocks_within_board",
+    it("still refuses a planet that runs off the edge, at any size", async () => {
+      // Off the square board is necessarily out of the universe too, so the
+      // database may cite either constraint; both are check violations.
+      await expect(reserve(pool, alice, 295, 150, 11)).rejects.toMatchObject({ code: "23514" });
+    });
+
+    it("refuses a planet in the void outside the orbits", async () => {
+      await expect(reserve(pool, alice, 5, 5, 1)).rejects.toMatchObject({
+        constraint: "blocks_within_universe",
       });
     });
 
     it("refuses to publish a block with nothing to render", async () => {
-      const block = await reserve(pool, alice, 0, 0, 1);
+      const block = await reserve(pool, alice, 100, 100, 1);
       await expect(
         pool.query(
           `UPDATE blocks SET status = 'live', reserved_until = NULL, published_at = now()
@@ -102,7 +108,7 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
     });
 
     it("publishes once the listing is filled in", async () => {
-      const block = await reserve(pool, alice, 0, 0, 1);
+      const block = await reserve(pool, alice, 100, 100, 1);
       await expect(publish(pool, block, "alice")).resolves.toBeDefined();
 
       const row = await pool.query<{ status: string; reserved_until: Date | null }>(
@@ -116,15 +122,15 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
     it("requires a reserved block to carry a hold, and a live one not to", async () => {
       await expect(
         pool.query(
-          `INSERT INTO blocks (user_id, x, y, size, status) VALUES ($1, 0, 0, 1, 'reserved')`,
+          `INSERT INTO blocks (user_id, x, y, size, status) VALUES ($1, 100, 100, 1, 'reserved')`,
           [alice],
         ),
       ).rejects.toMatchObject({ constraint: "blocks_reservation_window" });
     });
 
     it("keeps /b/[handle] unambiguous across live listings", async () => {
-      const first = await reserve(pool, alice, 0, 0, 1);
-      const second = await reserve(pool, alice, 1, 1, 1);
+      const first = await reserve(pool, alice, 100, 100, 1);
+      const second = await reserve(pool, alice, 101, 101, 1);
       await publish(pool, first, "creator");
 
       await expect(publish(pool, second, "CREATOR")).rejects.toMatchObject({
@@ -135,7 +141,7 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
 
   describe("click_events", () => {
     it("counts one click per visitor per block per day", async () => {
-      const block = await reserve(pool, alice, 0, 0, 1);
+      const block = await reserve(pool, alice, 100, 100, 1);
       const ip = Buffer.from("a".repeat(32));
 
       await pool.query(`INSERT INTO click_events (block_id, day, ip_hash) VALUES ($1, $2, $3)`, [
