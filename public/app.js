@@ -188,16 +188,165 @@ function currentSquare() {
 // Drawing
 // ---------------------------------------------------------------------------
 
+/**
+ * A starfield in three layers, each panning at its own rate.
+ *
+ * The parallax is what turns a picture of space into a place: the far layer
+ * barely moves while the near one tracks the board, so dragging feels like
+ * travelling rather than sliding a poster around. Positions are in board
+ * coordinates, generated once and padded past the edge so there is still sky
+ * beyond the last orbit.
+ */
+const STAR_LAYERS = [
+  { depth: 0.3, count: 320, minSize: 0.6, maxSize: 1.1, minAlpha: 0.16, maxAlpha: 0.45 },
+  { depth: 0.58, count: 190, minSize: 0.8, maxSize: 1.5, minAlpha: 0.28, maxAlpha: 0.7 },
+  { depth: 0.88, count: 90, minSize: 1.1, maxSize: 2.1, minAlpha: 0.45, maxAlpha: 1 },
+];
+
+const starLayers = STAR_LAYERS.map((layer) => ({ ...layer, stars: [] }));
+
+/** Seeded, so the sky is the same on every load rather than reshuffling. */
+function buildStars() {
+  let seed = 0x9e3779b9;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+
+  const pad = PX * 0.35;
+  for (const layer of starLayers) {
+    layer.stars = [];
+    for (let i = 0; i < layer.count; i += 1) {
+      layer.stars.push({
+        x: -pad + random() * (PX + pad * 2),
+        y: -pad + random() * (PX + pad * 2),
+        size: layer.minSize + random() * (layer.maxSize - layer.minSize),
+        alpha: layer.minAlpha + random() * (layer.maxAlpha - layer.minAlpha),
+        phase: random() * Math.PI * 2,
+        speed: 0.35 + random() * 1.15,
+        warm: random() > 0.86,
+      });
+    }
+  }
+}
+
+/**
+ * Drawn over the board rather than under it, and skipped wherever a planet is.
+ *
+ * Painting them behind would mean an alpha channel on the composite, which cost
+ * three quarters of a megabyte. Instead each star is projected back to the tile
+ * it falls on and dropped if that tile is occupied, so a star never appears in
+ * front of a world. The lookup is one array read against the index hit testing
+ * already uses.
+ */
+function drawStars(rect, seconds) {
+  for (const layer of starLayers) {
+    for (const star of layer.stars) {
+      const sx = originX * layer.depth + star.x * scale;
+      if (sx < -4 || sx > rect.width + 4) continue;
+      const sy = originY * layer.depth + star.y * scale;
+      if (sy < -4 || sy > rect.height + 4) continue;
+
+      const bx = Math.floor((sx - originX) / scale / TILE);
+      const by = Math.floor((sy - originY) / scale / TILE);
+      if (bx >= 0 && by >= 0 && bx < BOARD && by < BOARD && owner[by * BOARD + bx] !== -1) {
+        continue;
+      }
+
+      const twinkle = 0.62 + 0.38 * Math.sin(seconds * star.speed + star.phase);
+      ctx.globalAlpha = Math.min(1, star.alpha * twinkle);
+      ctx.fillStyle = star.warm ? "#ffe6c8" : "#dce9ff";
+      ctx.fillRect(sx, sy, star.size, star.size);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** Screen rect of a square's footprint, matching the composite's insets. */
+function rectFor(square) {
+  const x = Math.round(originX + (square.x * TILE + INSET) * scale);
+  const y = Math.round(originY + (square.y * TILE + INSET) * scale);
+  const side = Math.round((square.size * TILE - 2 * INSET) * scale);
+  return { x, y, side };
+}
+
+/** The planet inscribed in that footprint. */
+function orbitOf(square) {
+  const r = rectFor(square);
+  return { cx: r.x + r.side / 2, cy: r.y + r.side / 2, radius: r.side / 2 };
+}
+
+function ring(square, color, width, glow = 0) {
+  const { cx, cy, radius } = orbitOf(square);
+  ctx.save();
+  if (glow > 0) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = glow;
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(1, radius - width / 2), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function disc(square, color) {
+  const { cx, cy, radius } = orbitOf(square);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(1, radius), 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/**
+ * The tile grid, shown only while a claim is being placed.
+ *
+ * A universe with a grid painted permanently over it is just a spreadsheet, but
+ * someone choosing where their planet goes needs to see the squares they are
+ * choosing between. So it appears for the drag and then gets out of the way.
+ */
+function drawPlacementGrid(rect) {
+  const step = TILE * scale;
+  if (step < 6) return;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(120,160,220,0.13)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+
+  const top = Math.max(0, originY);
+  const bottom = Math.min(rect.height, originY + PX * scale);
+  const left = Math.max(0, originX);
+  const right = Math.min(rect.width, originX + PX * scale);
+
+  for (let i = 0; i <= BOARD; i += 1) {
+    const x = Math.round(originX + i * step) + 0.5;
+    if (x < -1 || x > rect.width + 1) continue;
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+  }
+  for (let i = 0; i <= BOARD; i += 1) {
+    const y = Math.round(originY + i * step) + 0.5;
+    if (y < -1 || y > rect.height + 1) continue;
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+  }
+
+  ctx.stroke();
+  ctx.restore();
+}
+
 function draw() {
   const rect = viewport.getBoundingClientRect();
-  ctx.clearRect(0, 0, rect.width, rect.height);
-  ctx.fillStyle = "#0d1015";
+  const seconds = performance.now() / 1000;
+
+  // The void, the sky the server drew, then the stars that move.
+  ctx.fillStyle = "#01020a";
   ctx.fillRect(0, 0, rect.width, rect.height);
 
   if (composite !== null) {
-    // One drawImage for the entire board. Snapped to whole pixels and with
-    // smoothing off at or above 1:1, so tile borders stay exactly one pixel.
-    ctx.imageSmoothingEnabled = scale < 0.98;
+    ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(
       composite,
@@ -208,20 +357,36 @@ function draw() {
     );
   }
 
-  drawReservedTiles();
+  drawStars(rect, seconds);
+  if (selection !== null) drawPlacementGrid(rect);
+
+  drawClaimedOrbits(seconds);
 
   const square = currentSquare();
   if (selection === null && hoverBlock >= 0) {
-    outline(blocks[hoverBlock], "rgba(255,255,255,0.92)", 2);
+    // A slow breath around the planet under the cursor, so hovering reads as
+    // catching the light rather than switching an outline on.
+    const pulse = 0.55 + 0.45 * Math.sin(seconds * 2.2);
+    ring(blocks[hoverBlock], `rgba(190,220,255,${(0.55 + 0.35 * pulse).toFixed(3)})`, 2, 18 * pulse);
   } else if (square !== null) {
     const free = isFree(square);
-    fill(square, free ? "rgba(74,222,128,0.22)" : "rgba(242,84,91,0.22)");
-    outline(square, free ? "#4ade80" : "#f2545b", 2);
+    disc(square, free ? "rgba(74,222,128,0.16)" : "rgba(242,84,91,0.18)");
+    ring(square, free ? "#4ade80" : "#f2545b", 2, 14);
+
+    // The square of tiles the planet actually occupies, so the size being
+    // bought is never a guess.
+    ctx.save();
+    ctx.strokeStyle = free ? "rgba(74,222,128,0.34)" : "rgba(242,84,91,0.34)";
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    const r = rectFor(square);
+    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.side - 1, r.side - 1);
+    ctx.restore();
   }
 
   for (const item of checkout.pending()) {
-    fill(item, "rgba(96,165,250,0.24)");
-    outline(item, "#60a5fa", 2);
+    disc(item, "rgba(96,165,250,0.18)");
+    ring(item, "#60a5fa", 2, 12);
   }
 
   drawFlashes();
@@ -229,54 +394,54 @@ function draw() {
 }
 
 /**
- * Tiles that are held but have no live block: someone's reservation, or a
- * listing waiting on review. They are not in the composite, so without this
- * they would look free.
+ * Orbits that are held but have no planet in them yet: someone's reservation,
+ * or a listing waiting on review. They are not in the composite, so without
+ * this they would look like empty space and be claimed again.
  */
-function drawReservedTiles() {
-  ctx.fillStyle = "rgba(245,180,80,0.42)";
+function drawClaimedOrbits(seconds) {
+  const pulse = 0.5 + 0.5 * Math.sin(seconds * 1.6);
+  ctx.save();
+  ctx.setLineDash([5, 5]);
+  ctx.lineDashOffset = -seconds * 12;
+  ctx.strokeStyle = `rgba(245,180,80,${(0.45 + 0.3 * pulse).toFixed(3)})`;
+  ctx.lineWidth = 1.5;
+
   for (let i = 0; i < held.length; i += 1) {
     if (held[i] === 0 || owner[i] !== -1) continue;
     const x = i % BOARD;
-    const r = rectFor({ x, y: (i - x) / BOARD, size: 1 });
-    ctx.fillRect(r.x, r.y, r.side, r.side);
+    const { cx, cy, radius } = orbitOf({ x, y: (i - x) / BOARD, size: 1 });
+    if (cx < -radius || cy < -radius) continue;
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(1, radius), 0, Math.PI * 2);
+    ctx.stroke();
   }
+  ctx.restore();
 }
 
+/** A shockwave that expands as it fades, so an arrival is felt, not just seen. */
 function drawFlashes() {
   const now = performance.now();
-  flashes = flashes.filter((flash) => now - flash.born < 1100);
+  flashes = flashes.filter((flash) => now - flash.born < 1400);
   for (const flash of flashes) {
-    const life = 1 - (now - flash.born) / 1100;
+    const life = 1 - (now - flash.born) / 1400;
     const rgb = flash.kind === "ok" ? "74,222,128" : "242,84,91";
-    fill(flash, `rgba(${rgb},${(life * 0.5).toFixed(3)})`);
-    outline(flash, `rgba(${rgb},${life.toFixed(3)})`, 2);
+    const { cx, cy, radius } = orbitOf(flash);
+
+    ctx.save();
+    ctx.strokeStyle = `rgba(${rgb},${life.toFixed(3)})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(1, radius) * (1 + (1 - life) * 1.6), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    disc(flash, `rgba(${rgb},${(life * 0.35).toFixed(3)})`);
   }
 }
 
-/** Screen rect of a square's drawn area, matching the composite's insets. */
-function rectFor(square) {
-  const x = Math.round(originX + (square.x * TILE + INSET) * scale);
-  const y = Math.round(originY + (square.y * TILE + INSET) * scale);
-  const side = Math.round((square.size * TILE - 2 * INSET) * scale);
-  return { x, y, side };
-}
-
-function fill(square, color) {
-  const r = rectFor(square);
-  ctx.fillStyle = color;
-  ctx.fillRect(r.x, r.y, r.side, r.side);
-}
-
-function outline(square, color, width) {
-  const r = rectFor(square);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.strokeRect(r.x + width / 2, r.y + width / 2, r.side - width, r.side - width);
-}
-
+/** The sky moves whether or not anything was clicked, so this always draws. */
 function frame() {
-  if (dirty || flashes.length > 0) draw();
+  draw();
   requestAnimationFrame(frame);
 }
 
@@ -462,7 +627,7 @@ canvas.addEventListener("pointerup", (event) => {
 
   if (!isFree(square)) {
     const why = checkout.claims(square) ? "already in your order" : "already taken";
-    toast("That square is " + why + ".", "bad");
+    toast("That orbit is " + why + ".", "bad");
     return;
   }
   checkout.add(square);
@@ -563,6 +728,7 @@ window.addEventListener("resize", () => {
 
 // Stats first: it carries the tile size every coordinate calculation depends on.
 await loadStats();
+buildStars();
 
 const featured = createFeaturedColumn({
   listEl: document.getElementById("featured-list"),

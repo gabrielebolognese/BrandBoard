@@ -13,7 +13,7 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
   let slots = [];
   let ticker = 0;
 
-  const modal = createModal({ title: "Feature a block", width: 460 });
+  const modal = createModal({ title: "Feature a planet", width: 460 });
   let chosen = null;
   let days = 1;
   let pricing = new Map();
@@ -132,19 +132,19 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
   }
 
   function renderPurchase() {
-    modal.setTitle("Feature a block");
+    modal.setTitle("Feature a planet");
     modal.body.textContent = "";
 
     const pick = document.createElement("div");
     pick.className = "field";
-    pick.innerHTML = '<label for="feat-pick">Block</label>';
+    pick.innerHTML = '<label for="feat-pick">Planet</label>';
 
     const select = document.createElement("select");
     select.id = "feat-pick";
     select.className = "select";
     const blank = document.createElement("option");
     blank.value = "";
-    blank.textContent = "Choose a live block";
+    blank.textContent = "Choose a live planet";
     select.append(blank);
 
     for (const block of liveBlocks()) {
@@ -227,7 +227,7 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
     buy.disabled = chosen === null;
     buy.textContent =
       chosen === null
-        ? "Choose a block first"
+        ? "Choose a planet first"
         : `Feature for ${days} day${days === 1 ? "" : "s"}`;
     buy.addEventListener("click", () => void purchase(buy));
     modal.footer.append(buy);

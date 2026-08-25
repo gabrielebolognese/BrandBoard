@@ -156,7 +156,7 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
         const drop = document.createElement("button");
         drop.type = "button";
         drop.className = "summary-remove";
-        drop.setAttribute("aria-label", `Remove the ${line.size} by ${line.size} block`);
+        drop.setAttribute("aria-label", `Remove the ${line.size} by ${line.size} planet`);
         drop.innerHTML = "&times;";
         drop.addEventListener("click", () => remove(index));
         row.append(drop);
@@ -173,7 +173,7 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     wrap.className = "totals";
 
     wrap.append(
-      totalLine("Blocks", String(lines.length)),
+      totalLine("Planets", String(lines.length)),
       totalLine("Tiles", tiles.toLocaleString()),
       totalLine("Billing", "Monthly, recurring"),
     );
@@ -211,7 +211,7 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     modal.footer.textContent = "";
     if (placeholder) modal.footer.append(notice("Prices are placeholders until a rate is set."));
 
-    const reserve = button("primary", "Reserve tiles and continue");
+    const reserve = button("primary", "Reserve orbit and continue");
     reserve.addEventListener("click", () => void doReserve(reserve));
     modal.footer.append(reserve);
 
@@ -315,7 +315,7 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     // The board's availability map is a hint; the server decides. Nothing was
     // reserved, so the cart is left exactly as it was.
     trigger.disabled = false;
-    trigger.textContent = "Reserve tiles and continue";
+    trigger.textContent = "Reserve orbit and continue";
     if (response.status === 409 && body !== null) {
       onConflict?.(body);
       modal.close();

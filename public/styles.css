@@ -1,7 +1,7 @@
 :root {
-  --ground: #07090c;
-  --panel: #0e1218;
-  --line: #1c2230;
+  --ground: #01020a;
+  --panel: rgba(10, 14, 27, 0.86);
+  --line: #1b2438;
   --ink: #e9edf4;
   --muted: #8792a5;
   --accent: #4ade80;
@@ -154,7 +154,7 @@ body {
   font-size: 12.5px;
   font-weight: 620;
   color: var(--muted);
-  background: #10151d;
+  background: #05081360;
   border: 1px dashed #2b3546;
   border-radius: var(--radius);
   cursor: pointer;
@@ -167,10 +167,10 @@ body {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
-  background-color: #10151d;
+  background-color: #04060f;
   background-image: url("/board.webp");
   background-repeat: no-repeat;
-  image-rendering: pixelated;
+  image-rendering: auto;
   cursor: pointer;
 }
 
@@ -226,7 +226,7 @@ body {
   position: relative;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: #0d1015;
+  background: #01020a;
   overflow: hidden;
   min-height: 0;
 }
@@ -284,7 +284,7 @@ body {
   border-radius: 8px;
   background-image: url("/board.webp");
   background-repeat: no-repeat;
-  image-rendering: pixelated;
+  image-rendering: auto;
 }
 
 .card-body { min-width: 0; }
@@ -398,7 +398,7 @@ body.modal-open { overflow: hidden; }
   max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
-  background: #0f141b;
+  background: #070b16;
   border: 1px solid #26303f;
   border-radius: 14px;
   box-shadow: 0 30px 70px rgba(0, 0, 0, 0.6);
@@ -443,7 +443,7 @@ body.modal-open { overflow: hidden; }
 .modal-foot {
   padding: 14px 18px 16px;
   border-top: 1px solid var(--line);
-  background: #0c1118;
+  background: #05091200;
 }
 
 /* order summary ----------------------------------------------------------- */
