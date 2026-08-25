@@ -63,3 +63,41 @@ export function pricePerTileCentsPerMonth(): number {
 export function monthlyPriceCents(size: number): number {
   return size * size * pricePerTileCentsPerMonth();
 }
+
+// ---------------------------------------------------------------------------
+// Featured slots
+// ---------------------------------------------------------------------------
+
+/**
+ * Featuring is bought per block, in whole days, and each purchase runs its own
+ * clock from the moment it is bought. There is no shared daily reset: a slot
+ * bought at noon expires at noon, whatever anyone else bought and when.
+ */
+export const FEATURED_MIN_DAYS = 1;
+export const FEATURED_MAX_DAYS = 10;
+
+/** The first day costs more than the ones after it. */
+export const FEATURED_FIRST_DAY_CENTS = 1000;
+export const FEATURED_ADDITIONAL_DAY_CENTS = 800;
+
+/** How many featured blocks the board shows at once. */
+export const FEATURED_SLOTS = 5;
+
+export function isValidFeaturedDays(days: number): boolean {
+  return Number.isInteger(days) && days >= FEATURED_MIN_DAYS && days <= FEATURED_MAX_DAYS;
+}
+
+/**
+ * $10 for the first day and $8 for every additional one, so 3 days is
+ * 1000 + 2 * 800 = 2600, and the 10 day maximum is 8200.
+ *
+ * A one-off charge, unlike tile rent, which recurs monthly.
+ */
+export function featuredPriceCents(days: number): number {
+  if (!isValidFeaturedDays(days)) {
+    throw new Error(
+      `Featured runs from ${FEATURED_MIN_DAYS} to ${FEATURED_MAX_DAYS} days; got ${days}.`,
+    );
+  }
+  return FEATURED_FIRST_DAY_CENTS + (days - 1) * FEATURED_ADDITIONAL_DAY_CENTS;
+}

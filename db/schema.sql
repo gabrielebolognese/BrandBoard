@@ -162,6 +162,42 @@ CREATE TABLE IF NOT EXISTS occupied_tiles (
 CREATE INDEX IF NOT EXISTS occupied_tiles_block_id_idx ON occupied_tiles (block_id);
 
 -- ---------------------------------------------------------------------------
+-- featured_slots
+-- ---------------------------------------------------------------------------
+--
+-- A block can be featured for a stretch of days, bought separately from the
+-- tile rent. Each purchase carries its own window: starts_at is when it was
+-- bought and expires_at is that plus the days paid for. There is no shared
+-- daily reset, so two slots bought five hours apart expire five hours apart.
+--
+-- A block may be featured more than once over its life, so this is a table of
+-- purchases rather than a column on blocks. Overlapping windows for one block
+-- are allowed and simply extend the time it appears.
+
+CREATE TABLE IF NOT EXISTS featured_slots (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  block_id            uuid NOT NULL REFERENCES blocks (id) ON DELETE CASCADE,
+
+  days                smallint NOT NULL,
+  price_cents         integer NOT NULL,
+  checkout_session_id text,
+
+  starts_at           timestamptz NOT NULL DEFAULT now(),
+  expires_at          timestamptz NOT NULL,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+
+  CONSTRAINT featured_days_range CHECK (days BETWEEN 1 AND 10),
+  CONSTRAINT featured_price_positive CHECK (price_cents > 0),
+  CONSTRAINT featured_window_forward CHECK (expires_at > starts_at)
+);
+
+-- Drives the "what is featured right now" read, which filters on expires_at.
+CREATE INDEX IF NOT EXISTS featured_slots_active_idx
+  ON featured_slots (expires_at DESC);
+
+CREATE INDEX IF NOT EXISTS featured_slots_block_idx ON featured_slots (block_id);
+
+-- ---------------------------------------------------------------------------
 -- click_events
 -- ---------------------------------------------------------------------------
 --

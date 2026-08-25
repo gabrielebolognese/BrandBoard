@@ -25,7 +25,10 @@
     </header>
 
     <main class="layout">
-      <aside class="featured" id="featured"></aside>
+      <aside class="featured">
+        <div class="featured-list" id="featured-list"></div>
+        <button type="button" class="featured-buy" id="featured-buy">Feature a block</button>
+      </aside>
 
       <div class="viewport" id="viewport">
         <canvas id="board"></canvas>
@@ -34,14 +37,6 @@
 
     <div class="badge" id="badge" hidden></div>
 
-    <section class="terminal" id="terminal" hidden>
-      <header class="terminal-head">
-        <span id="terminal-title">Your blocks</span>
-        <button type="button" id="terminal-close" aria-label="Close">&times;</button>
-      </header>
-      <div class="terminal-body" id="terminal-body"></div>
-      <footer class="terminal-foot" id="terminal-foot"></footer>
-    </section>
 
     <div class="card" id="card" hidden>
       <div class="card-avatar" id="card-avatar"></div>

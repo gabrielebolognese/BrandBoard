@@ -4,7 +4,7 @@ import { claimBlock } from "./board/claim.js";
 import { avatarPixelsFor, generateAvatar } from "./board/avatar.js";
 import { invalidateCompositeBoard } from "./board/composite.js";
 import { TileConflictError } from "./board/errors.js";
-import { BOARD_SIZE } from "./config.js";
+import { BOARD_SIZE, featuredPriceCents } from "./config.js";
 
 /**
  * Fills the board with plausible fake listings so the rendering work has
@@ -98,8 +98,39 @@ export async function seedBoard(
     }
   }
 
+  await seedFeatured(pool, random);
+
   invalidateCompositeBoard();
   return { blocks, tiles, attempts };
+}
+
+/**
+ * Featured windows, deliberately staggered.
+ *
+ * Bought at different moments in the recent past with different lengths, so the
+ * column shows five unrelated countdowns rather than five identical ones. This
+ * is the whole point of the model: no shared reset, one clock per purchase.
+ *
+ * Inserted directly rather than through featureBlock() because that always
+ * starts at now(), and a demo board wants windows already partway through.
+ */
+async function seedFeatured(pool: Pool, random: () => number): Promise<void> {
+  const live = await pool.query<{ id: string }>(
+    `SELECT id FROM blocks WHERE status = 'live' ORDER BY size DESC, published_at DESC LIMIT 5`,
+  );
+
+  let boughtHoursAgo = 1;
+  for (const block of live.rows) {
+    const days = 1 + Math.floor(random() * 4);
+    await pool.query(
+      `INSERT INTO featured_slots (block_id, days, price_cents, starts_at, expires_at)
+       VALUES ($1, $2::int, $3,
+               now() - make_interval(hours => $4::int),
+               now() - make_interval(hours => $4::int) + make_interval(days => $2::int))`,
+      [block.id, days, featuredPriceCents(days), boughtHoursAgo],
+    );
+    boughtHoursAgo += 3 + Math.floor(random() * 6);
+  }
 }
 
 interface Listing {

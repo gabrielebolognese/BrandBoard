@@ -4,6 +4,9 @@
 // DOM nodes and never ten thousand image requests. Everything interactive is
 // arithmetic against (x, y, size): there are no per-block event listeners.
 
+import { createCheckout } from "./checkout.js";
+import { createFeaturedColumn } from "./featured.js";
+
 const BOARD = 100;
 
 /**
@@ -30,7 +33,6 @@ const viewport = document.getElementById("viewport");
 const card = document.getElementById("card");
 const badge = document.getElementById("badge");
 const toastEl = document.getElementById("toast");
-const featuredEl = document.getElementById("featured");
 
 let blocks = [];
 const owner = new Int16Array(BOARD * BOARD).fill(-1);
@@ -51,14 +53,7 @@ let rateCentsPerMonth = 0;
 let priceIsPlaceholder = false;
 let maxBlockSize = 25;
 
-/** Squares chosen but not yet reserved. One checkout can cover several. */
-let cart = [];
-/** Set once the cart has been reserved and priced by the server. */
-let checkoutSession = null;
-let holdTimer = 0;
-
 const detailCache = new Map();
-let featuredBlocks = [];
 let toastTimer = 0;
 
 // ---------------------------------------------------------------------------
@@ -114,52 +109,6 @@ function loadComposite() {
     image.onerror = () => resolve();
     image.src = "/board.webp";
   });
-}
-
-// ---------------------------------------------------------------------------
-// Featured column
-// ---------------------------------------------------------------------------
-
-async function loadFeatured() {
-  const { blocks: rows } = await (await fetch("/api/featured")).json();
-  featuredBlocks = rows;
-  featuredEl.textContent = "";
-
-  for (const block of rows) {
-    const cell = document.createElement("div");
-    cell.className = "feat";
-    cell.title = `${block.name} @${block.handle}`;
-
-    const label = document.createElement("div");
-    label.className = "feat-label";
-    label.textContent = block.name;
-    cell.append(label);
-
-    cell.addEventListener("click", () => {
-      window.open(block.url, "_blank", "noopener,noreferrer");
-    });
-    featuredEl.append(cell);
-  }
-  paintFeatured();
-}
-
-/**
- * Each featured cell is a crop of the composite, so the column costs no extra
- * image requests. The crop depends on the rendered size, so it is recomputed
- * whenever the column is laid out.
- */
-function paintFeatured() {
-  const cells = featuredEl.children;
-  for (let i = 0; i < cells.length; i += 1) {
-    const cell = cells[i];
-    const block = featuredBlocks[i];
-    if (block === undefined) continue;
-    const side = cell.clientWidth;
-    if (side === 0) continue;
-    const k = side / (block.size * TILE);
-    cell.style.backgroundSize = `${PX * k}px ${PX * k}px`;
-    cell.style.backgroundPosition = `${-block.x * TILE * k}px ${-block.y * TILE * k}px`;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,23 +170,7 @@ function isFree(square) {
       if (held[(square.y + dy) * BOARD + (square.x + dx)] === 1) return false;
     }
   }
-  return !overlapsCart(square);
-}
-
-/** A square already in the cart is spoken for, even though nobody holds it yet. */
-function overlapsCart(square, ignore = -1) {
-  return cart.some(
-    (item, i) =>
-      i !== ignore &&
-      square.x < item.x + item.size &&
-      item.x < square.x + square.size &&
-      square.y < item.y + item.size &&
-      item.y < square.y + square.size,
-  );
-}
-
-function money(cents) {
-  return (cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" });
+  return !checkout.claims(square);
 }
 
 /** The square currently under the cursor: dragged size, or 1x1 when hovering. */
@@ -282,7 +215,7 @@ function draw() {
     outline(square, free ? "#4ade80" : "#f2545b", 2);
   }
 
-  for (const item of cart) {
+  for (const item of checkout.pending()) {
     fill(item, "rgba(96,165,250,0.24)");
     outline(item, "#60a5fa", 2);
   }
@@ -526,11 +459,12 @@ canvas.addEventListener("pointerup", (event) => {
   dirty = true;
 
   if (!isFree(square)) {
-    const why = overlapsCart(square) ? "already in your cart" : "already taken";
+    const why = checkout.claims(square) ? "already in your order" : "already taken";
     toast("That square is " + why + ".", "bad");
     return;
   }
-  addToCart(square);
+  checkout.add(square);
+  dirty = true;
 });
 
 canvas.addEventListener("pointerleave", () => {
@@ -584,268 +518,6 @@ canvas.addEventListener(
 // Claiming
 // ---------------------------------------------------------------------------
 
-function addToCart(square) {
-  cart.push(square);
-  checkoutSession = null;
-  renderTerminal();
-  dirty = true;
-}
-
-function removeFromCart(index) {
-  cart.splice(index, 1);
-  renderTerminal();
-  dirty = true;
-}
-
-function clearCart() {
-  cart = [];
-  checkoutSession = null;
-  window.clearInterval(holdTimer);
-  renderTerminal();
-  dirty = true;
-}
-
-// ---------------------------------------------------------------------------
-// The buying terminal
-// ---------------------------------------------------------------------------
-
-const terminal = document.getElementById("terminal");
-const terminalTitle = document.getElementById("terminal-title");
-const terminalBody = document.getElementById("terminal-body");
-const terminalFoot = document.getElementById("terminal-foot");
-
-document.getElementById("terminal-close").addEventListener("click", () => {
-  // In checkout the blocks are already reserved, so closing only hides the
-  // panel. In cart mode nothing is held yet, so closing discards it.
-  if (checkoutSession !== null) {
-    checkoutSession = null;
-    window.clearInterval(holdTimer);
-    renderTerminal();
-    return;
-  }
-  clearCart();
-});
-
-function renderTerminal() {
-  if (checkoutSession !== null) {
-    renderCheckout();
-    return;
-  }
-  if (cart.length === 0) {
-    terminal.hidden = true;
-    return;
-  }
-
-  terminal.hidden = false;
-  terminalTitle.textContent = "Your blocks (" + cart.length + ")";
-  terminalBody.textContent = "";
-
-  cart.forEach((item, index) => {
-    const monthly = item.size * item.size * rateCentsPerMonth;
-    terminalBody.append(
-      lineRow({
-        size: item.size,
-        title: item.size + "x" + item.size + " block",
-        sub: "(" + item.x + ", " + item.y + ") &middot; " + item.size * item.size + " tiles",
-        price: money(monthly) + "/mo",
-        onRemove: () => removeFromCart(index),
-      }),
-    );
-  });
-
-  const total = cart.reduce((sum, i) => sum + i.size * i.size * rateCentsPerMonth, 0);
-  const tiles = cart.reduce((sum, i) => sum + i.size * i.size, 0);
-
-  terminalFoot.textContent = "";
-  terminalFoot.append(totalRow("Total", total));
-
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "buy";
-  button.textContent = "Reserve and continue";
-  button.addEventListener("click", () => {
-    void startCheckout(button);
-  });
-  terminalFoot.append(button);
-
-  const note = document.createElement("p");
-  note.className = "note";
-  note.innerHTML =
-    tiles + " tile" + (tiles === 1 ? "" : "s") + " billed monthly. Reserving holds them " +
-    "for 15 minutes while you pay." +
-    (priceIsPlaceholder ? " <strong>Placeholder price.</strong>" : "");
-  terminalFoot.append(note);
-}
-
-/**
- * Reserve the whole cart in one transaction, then show what the server priced.
- * From here on the total shown is the server's, not the one added up in the
- * page: the client never decides what anything costs.
- */
-async function startCheckout(button) {
-  button.disabled = true;
-  button.textContent = "Reserving...";
-
-  let response;
-  try {
-    response = await fetch("/api/checkout", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ placements: cart }),
-    });
-  } catch {
-    toast("Could not reach the server.", "bad");
-    button.disabled = false;
-    button.textContent = "Reserve and continue";
-    return;
-  }
-
-  const body = await response.json();
-
-  if (response.status === 201) {
-    checkoutSession = body;
-    cart = [];
-    await Promise.all([loadAvailability(), loadStats()]);
-    renderCheckout();
-    dirty = true;
-    return;
-  }
-
-  // The optimistic bitmap said those squares were free; the server is the
-  // authority and it disagreed. Nothing was reserved.
-  if (response.status === 409) {
-    for (const tile of body.conflicts ?? []) {
-      flashes.push({ x: tile.x, y: tile.y, size: 1, kind: "bad", born: performance.now() });
-    }
-    toast(body.message ?? "Someone claimed one of those squares first.", "bad");
-    await loadAvailability();
-  } else {
-    toast(body.message ?? "That checkout was rejected.", "bad");
-  }
-
-  button.disabled = false;
-  button.textContent = "Reserve and continue";
-  dirty = true;
-}
-
-function renderCheckout() {
-  const session = checkoutSession;
-  terminal.hidden = false;
-  terminalTitle.textContent = "Checkout";
-  terminalBody.textContent = "";
-
-  for (const line of session.lines) {
-    terminalBody.append(
-      lineRow({
-        size: line.size,
-        title: line.size + "x" + line.size + " block",
-        sub: "(" + line.x + ", " + line.y + ") &middot; " + line.tiles + " tiles",
-        price: money(line.monthlyCents) + "/mo",
-      }),
-    );
-  }
-
-  terminalFoot.textContent = "";
-
-  const hold = document.createElement("p");
-  hold.className = "hold";
-  terminalFoot.append(hold);
-  terminalFoot.append(totalRow("Total", session.monthlyTotalCents));
-
-  const pay = document.createElement("button");
-  pay.type = "button";
-  pay.className = "buy";
-  pay.disabled = !session.ready;
-  pay.textContent = session.ready ? "Pay with Paddle" : "Paddle not connected yet";
-  terminalFoot.append(pay);
-
-  const back = document.createElement("button");
-  back.type = "button";
-  back.className = "buy secondary";
-  back.textContent = "Done";
-  back.addEventListener("click", () => {
-    checkoutSession = null;
-    window.clearInterval(holdTimer);
-    renderTerminal();
-  });
-  terminalFoot.append(back);
-
-  const note = document.createElement("p");
-  note.className = "note";
-  note.innerHTML =
-    "Checkout " + session.id.slice(0, 12) + "... &middot; " +
-    money(session.rateCentsPerTilePerMonth) + " per tile per month." +
-    (session.rateIsPlaceholder ? " <strong>Placeholder price.</strong>" : "") +
-    " Tiles stay held until payment; if the hold lapses they go back on sale.";
-  terminalFoot.append(note);
-
-  window.clearInterval(holdTimer);
-  const tick = () => {
-    const left = new Date(session.expiresAt).getTime() - Date.now();
-    if (left <= 0) {
-      hold.innerHTML = "<b>Hold expired.</b> Those tiles are back on sale.";
-      window.clearInterval(holdTimer);
-      void loadAvailability();
-      return;
-    }
-    const m = Math.floor(left / 60000);
-    const sec = Math.floor((left % 60000) / 1000);
-    hold.innerHTML = "Tiles held for <b>" + m + ":" + String(sec).padStart(2, "0") + "</b>";
-  };
-  tick();
-  holdTimer = window.setInterval(tick, 1000);
-}
-
-function lineRow(spec) {
-  const row = document.createElement("div");
-  row.className = "line";
-
-  const swatch = document.createElement("div");
-  swatch.className = "line-swatch";
-  swatch.textContent = spec.size + "x" + spec.size;
-  row.append(swatch);
-
-  const main = document.createElement("div");
-  main.className = "line-main";
-  const title = document.createElement("div");
-  title.className = "line-title";
-  title.textContent = spec.title;
-  const sub = document.createElement("div");
-  sub.className = "line-sub";
-  sub.innerHTML = spec.sub;
-  main.append(title, sub);
-  row.append(main);
-
-  const price = document.createElement("div");
-  price.className = "line-price";
-  price.textContent = spec.price;
-  row.append(price);
-
-  if (spec.onRemove !== undefined) {
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "line-remove";
-    remove.setAttribute("aria-label", "Remove");
-    remove.innerHTML = "&times;";
-    remove.addEventListener("click", spec.onRemove);
-    row.append(remove);
-  }
-  return row;
-}
-
-function totalRow(label, cents) {
-  const wrap = document.createElement("div");
-  wrap.className = "total";
-  const l = document.createElement("span");
-  l.className = "total-label";
-  l.textContent = label;
-  const v = document.createElement("span");
-  v.className = "total-value";
-  v.innerHTML = money(cents) + "<small>/mo</small>";
-  wrap.append(l, v);
-  return wrap;
-}
-
 // ---------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------
@@ -866,17 +538,17 @@ document.querySelector(".dev").addEventListener("click", async (event) => {
 
   if (action === "reset") {
     await fetch("/api/reset", { method: "POST" });
-    clearCart();
+    checkout.clear();
     toast("Board emptied. Restart the server to reseed.", "ok");
     await Promise.all([loadManifest(), loadAvailability(), loadStats(), loadComposite()]);
-    await loadFeatured();
+    await featured.refresh();
   }
 });
 
 window.addEventListener("resize", () => {
   resize();
   clampView();
-  paintFeatured();
+  featured.repaint();
 });
 
 // ---------------------------------------------------------------------------
@@ -885,12 +557,44 @@ window.addEventListener("resize", () => {
 
 // Stats first: it carries the tile size every coordinate calculation depends on.
 await loadStats();
+
+const featured = createFeaturedColumn({
+  listEl: document.getElementById("featured-list"),
+  buyEl: document.getElementById("featured-buy"),
+  geometry: () => ({ tile: TILE, px: PX }),
+  liveBlocks: () => blocks,
+  onPurchase: () => {
+    dirty = true;
+  },
+});
+
+const checkout = createCheckout({
+  rate: () => ({ cents: rateCentsPerMonth, placeholder: priceIsPlaceholder }),
+  onChange: () => {
+    dirty = true;
+  },
+  onReserved: async () => {
+    await Promise.all([loadAvailability(), loadStats()]);
+    dirty = true;
+  },
+  onConflict: (body) => {
+    for (const tile of body.conflicts ?? []) {
+      flashes.push({ x: tile.x, y: tile.y, size: 1, kind: "bad", born: performance.now() });
+    }
+    toast(body.message ?? "Someone claimed one of those squares first.", "bad");
+    void loadAvailability();
+  },
+});
 resize();
 openingView();
 requestAnimationFrame(frame);
 
 void loadComposite();
-void Promise.all([loadManifest(), loadAvailability(), loadFeatured()]);
+void Promise.all([
+  loadManifest().then(() => featured.refresh()),
+  loadAvailability(),
+  featured.loadPricing(),
+]);
 
 // The watching count is server state that drifts once a minute, so poll for it
 // rather than inventing a number per browser.

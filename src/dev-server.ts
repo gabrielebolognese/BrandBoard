@@ -10,15 +10,21 @@ import { ClaimError, TileConflictError } from "./board/errors.js";
 import { isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
+import { InvalidFeaturedDaysError, activeFeatured, featureBlock } from "./board/featured.js";
 import { availabilityBitmap, buildManifest, heldTileCount } from "./board/manifest.js";
 import { currentlyWatching, startWatchingTicker } from "./board/watching.js";
 import {
   BILLING_PERIOD,
   BOARD_SIZE,
+  FEATURED_MAX_DAYS,
+  FEATURED_MIN_DAYS,
+  FEATURED_SLOTS,
   MAX_BLOCK_SIZE,
   TILE_COUNT,
   TILE_INSET,
   TILE_PIXELS,
+  featuredPriceCents,
+  isValidFeaturedDays,
   monthlyPriceCents,
   pricePerTileCentsPerMonth,
 } from "./config.js";
@@ -98,8 +104,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (method === "GET") {
     if (path === "/") return sendFile(res, new URL("index.html", PUBLIC_DIR));
-    if (path === "/app.js") return sendFile(res, new URL("app.js", PUBLIC_DIR));
-    if (path === "/styles.css") return sendFile(res, new URL("styles.css", PUBLIC_DIR));
+
+    const asset = /^\/([\w.-]+\.(?:js|css))$/.exec(path);
+    if (asset?.[1] !== undefined) return sendFile(res, new URL(basename(asset[1]), PUBLIC_DIR));
 
     if (path === "/board.webp") return sendCompositeBoard(req, res);
     if (path === "/api/manifest") return sendManifest(req, res);
@@ -121,6 +128,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return sendJson(res, 200, { id: session[1], blocks: await readCheckout(pool, session[1]) });
     }
 
+    if (path === "/api/featured/quote") {
+      const days = Number(requestUrl.searchParams.get("days") ?? "1");
+      if (!isValidFeaturedDays(days)) {
+        return sendJson(res, 400, {
+          error: "invalid_featured_days",
+          message: `Featuring runs from ${FEATURED_MIN_DAYS} to ${FEATURED_MAX_DAYS} days.`,
+        });
+      }
+      return sendJson(res, 200, {
+        days,
+        priceCents: featuredPriceCents(days),
+        // One-off, unlike tile rent. Buying more days does not renew anything.
+        recurring: false,
+      });
+    }
+
     if (path === "/api/quote") {
       const size = Number(requestUrl.searchParams.get("size") ?? "1");
       // Refuse to price something nobody can buy: a quote for a 26x26 would be
@@ -139,6 +162,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (method === "POST") {
     if (path === "/api/claim") return claim(req, res);
     if (path === "/api/checkout") return checkout(req, res);
+    if (path === "/api/featured") return buyFeatured(req, res);
+
+    const pay = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/pay$/.exec(path);
+    if (pay?.[1] !== undefined) return payCheckout(res, pay[1]);
     if (path === "/api/sweep") return sendJson(res, 200, await runReservationSweep(pool));
     if (path === "/api/reset") {
       if (!resettable) return sendJson(res, 403, { error: "not_a_dev_database", databaseName });
@@ -209,18 +236,15 @@ async function sendBlockDetail(res: ServerResponse, id: string): Promise<void> {
 }
 
 /**
- * The five blocks the left column shows. Biggest first, because the largest
- * squares are the ones someone paid most for; clicks break the tie.
+ * The blocks the left column shows: the featured windows that are open right
+ * now, newest purchase first. Each carries its own remaining time, because each
+ * was bought on its own clock.
  */
 async function featured(pool: Pool): Promise<unknown> {
-  const result = await pool.query(
-    `SELECT id, x, y, size, display_name AS name, handle, primary_url AS url
-       FROM blocks
-      WHERE status = 'live'
-      ORDER BY size DESC, click_count DESC, published_at DESC
-      LIMIT 5`,
-  );
-  return { blocks: result.rows };
+  return {
+    slots: FEATURED_SLOTS,
+    blocks: await activeFeatured(pool),
+  };
 }
 
 async function stats(pool: Pool): Promise<unknown> {
@@ -330,6 +354,77 @@ async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void
       });
     }
     if (error instanceof ClaimError) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
+  }
+}
+
+/**
+ * The buy button's endpoint.
+ *
+ * Everything a real payment needs is in place: the order exists, the tiles are
+ * held, and the amount is known. The only missing piece is the provider, so
+ * this answers 503 rather than pretending. When Paddle is wired up, this is
+ * where the transaction is created and a redirect URL comes back.
+ */
+async function payCheckout(res: ServerResponse, checkoutId: string): Promise<void> {
+  const blocks = await readCheckout(pool, checkoutId);
+
+  if (blocks.length === 0) {
+    return sendJson(res, 404, { error: "unknown_checkout", message: "No such order." });
+  }
+
+  const stillHeld = blocks.some(
+    (block) =>
+      block.status === "reserved" &&
+      block.reservedUntil !== null &&
+      block.reservedUntil.getTime() > Date.now(),
+  );
+
+  if (!stillHeld) {
+    return sendJson(res, 410, {
+      error: "hold_expired",
+      message: "The hold on those tiles expired and they went back on sale.",
+    });
+  }
+
+  return sendJson(res, 503, {
+    error: "payment_provider_not_configured",
+    provider: "paddle",
+    message:
+      "Paddle is not connected yet, so no charge was attempted. The order is valid and " +
+      "the tiles stay held until the reservation lapses.",
+    checkoutId,
+    blocks: blocks.length,
+  });
+}
+
+/** Buys a featured window for a block. The clock starts now, not at midnight. */
+async function buyFeatured(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let blockId: string;
+  let days: number;
+  try {
+    const body = (await readJson(req)) as { blockId?: unknown; days?: unknown };
+    if (typeof body.blockId !== "string" || typeof body.days !== "number") {
+      throw new Error("expected blockId and days");
+    }
+    blockId = body.blockId;
+    days = body.days;
+  } catch (error) {
+    return sendJson(res, 400, { error: "bad_request", detail: String(error) });
+  }
+
+  try {
+    const slot = await featureBlock(pool, blockId, days);
+    return sendJson(res, 201, {
+      ...slot,
+      days,
+      // Paddle is not wired, so nothing was charged for this either.
+      charged: false,
+    });
+  } catch (error) {
+    if (error instanceof InvalidFeaturedDaysError) {
       return sendJson(res, error.status, { error: error.code, message: error.message });
     }
     throw error;
