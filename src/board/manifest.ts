@@ -15,6 +15,8 @@ export interface ManifestBlock {
   readonly name: string;
   readonly handle: string;
   readonly url: string;
+  /** Which halo colour to draw behind it. */
+  readonly aura: string;
 }
 
 export interface BoardManifest {
@@ -42,7 +44,7 @@ export async function buildManifest(pool: Pool): Promise<BoardManifest> {
   const [version, blocks] = await Promise.all([
     boardVersion(pool),
     pool.query<ManifestBlock>(
-      `SELECT id, x, y, size, display_name AS name, handle, primary_url AS url
+      `SELECT id, x, y, size, display_name AS name, handle, primary_url AS url, aura
          FROM blocks
         WHERE status = 'live'
         ORDER BY x, y`,

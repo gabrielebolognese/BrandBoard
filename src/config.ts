@@ -174,3 +174,91 @@ export function featuredPriceCents(days: number): number {
   }
   return FEATURED_FIRST_DAY_CENTS + (days - 1) * FEATURED_ADDITIONAL_DAY_CENTS;
 }
+
+// ---------------------------------------------------------------------------
+// Auras
+// ---------------------------------------------------------------------------
+
+/**
+ * The halo a planet sits in. A fixed set rather than a free colour, so the sky
+ * stays coherent and nothing user-supplied is rendered as a colour value.
+ */
+export interface Aura {
+  readonly name: string;
+  readonly label: string;
+  readonly rgb: string;
+}
+
+export const AURAS: readonly Aura[] = [
+  { name: "violet", label: "Violet", rgb: "168, 85, 247" },
+  { name: "azure", label: "Azure", rgb: "96, 165, 250" },
+  { name: "cyan", label: "Cyan", rgb: "34, 211, 238" },
+  { name: "emerald", label: "Emerald", rgb: "52, 211, 153" },
+  { name: "amber", label: "Amber", rgb: "251, 191, 36" },
+  { name: "rose", label: "Rose", rgb: "244, 114, 182" },
+  { name: "pearl", label: "Pearl", rgb: "226, 234, 250" },
+];
+
+export const DEFAULT_AURA = "azure";
+
+export function isKnownAura(name: unknown): name is string {
+  return typeof name === "string" && AURAS.some((aura) => aura.name === name);
+}
+
+// ---------------------------------------------------------------------------
+// Trials
+// ---------------------------------------------------------------------------
+
+/** Long enough to see whether anyone clicks, short enough not to be free rent. */
+export const TRIAL_DAYS = 3;
+
+// ---------------------------------------------------------------------------
+// Reach
+// ---------------------------------------------------------------------------
+
+/**
+ * A projection of how often a planet gets clicked, shown at checkout.
+ *
+ * This is a model, not a measurement, and it is labelled as one everywhere it
+ * appears. It scales with the two things that actually decide whether a planet
+ * is noticed: how big it is on screen, and how close it is to the centre, which
+ * is where every visitor starts.
+ *
+ * Once clicks are recorded for real, this should be replaced by the observed
+ * rate for planets of a similar size and orbit. Until then it must never be
+ * presented as a promise.
+ */
+const BASE_CLICK_RATE = 0.012;
+
+const ORBIT_ATTENTION: Record<string, number> = {
+  core: 1,
+  inner: 0.55,
+  outer: 0.25,
+};
+
+export interface ReachEstimate {
+  readonly low: number;
+  readonly high: number;
+  readonly basis: string;
+}
+
+export function estimatedMonthlyClicks(
+  x: number,
+  y: number,
+  size: number,
+  dailyVisitors: number,
+): ReachEstimate {
+  const middle = Math.floor(size / 2);
+  const orbit = orbitAt(x + middle, y + middle);
+  const attention = ORBIT_ATTENTION[orbit?.name ?? "outer"] ?? ORBIT_ATTENTION["outer"] ?? 0.25;
+
+  // Screen presence grows with the side of the planet, not its area: a 4x4 is
+  // four times as noticeable as a 1x1, not sixteen.
+  const centre = dailyVisitors * 30 * BASE_CLICK_RATE * attention * size;
+
+  return {
+    low: Math.max(0, Math.round(centre * 0.65)),
+    high: Math.round(centre * 1.35),
+    basis: `${dailyVisitors.toLocaleString()} visitors a day, ${orbit?.label ?? "the void"}`,
+  };
+}

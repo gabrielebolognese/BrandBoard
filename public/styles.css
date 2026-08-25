@@ -670,3 +670,118 @@ body.modal-open { overflow: hidden; }
   background: var(--accent);
   border-color: var(--accent);
 }
+
+/* the planet preview ------------------------------------------------------ */
+
+.planet-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 22px 0 6px;
+}
+
+.planet-orb {
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  background-color: #131a26;
+  background-size: cover;
+  background-position: center;
+  position: relative;
+  transition: box-shadow 200ms ease;
+}
+
+/* The same lighting the server bakes into a real planet: highlight up and to
+   the left, shadow away from it, a rim where a star behind catches the limb. */
+.planet-orb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.1) 34%,
+      rgba(0, 0, 16, 0.34) 72%, rgba(0, 0, 8, 0.72) 100%),
+    radial-gradient(circle at 50% 50%, transparent 86%, rgba(191, 224, 255, 0.55) 97%,
+      transparent 100%);
+}
+
+.planet-orb:not(.has-photo)::before {
+  content: "?";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 30px;
+  font-weight: 700;
+  color: #3c4761;
+  z-index: 1;
+}
+
+.preview-hint { margin: 0; font-size: 11.5px; color: var(--muted); text-align: center; }
+
+/* form controls ----------------------------------------------------------- */
+
+.input {
+  width: 100%;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: #131a24;
+  border: 1px solid #2b3546;
+  border-radius: 8px;
+  resize: vertical;
+}
+
+.input:focus { outline: none; border-color: #4a5a76; }
+
+.filepick {
+  display: block;
+  padding: 10px 0;
+  font-size: 12.5px;
+  font-weight: 620;
+  color: var(--muted);
+  text-align: center;
+  background: #10151d;
+  border: 1px dashed #2b3546;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.filepick:hover { color: var(--ink); border-color: #3d4a60; }
+
+.filepick input { display: none; }
+
+.auras { display: flex; gap: 8px; }
+
+.aura {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--aura);
+  cursor: pointer;
+  box-shadow: 0 0 12px 2px color-mix(in srgb, var(--aura) 55%, transparent);
+}
+
+.aura[aria-pressed="true"] { border-color: var(--ink); }
+
+/* reach ------------------------------------------------------------------- */
+
+.reach {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 14px;
+  padding: 11px 12px;
+  background: #101a16;
+  border: 1px solid #21402f;
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+}
+
+.reach strong { font-size: 14px; font-weight: 660; color: #d6f5e2; }
+
+.reach span { font-size: 11px; line-height: 1.5; color: var(--muted); }

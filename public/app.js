@@ -52,6 +52,8 @@ let flashes = [];
 let dirty = true;
 
 let orbits = [];
+let auras = [];
+let trialDays = 3;
 let universeRadius = 150;
 let boardCenter = 150;
 let maxBlockSize = 25;
@@ -75,6 +77,8 @@ async function loadStats() {
   }
   PX = BOARD * TILE;
   orbits = stats.orbits;
+  auras = stats.auras ?? [];
+  trialDays = stats.trialDays ?? 3;
   universeRadius = stats.universeRadius;
   boardCenter = stats.boardCenter;
   maxBlockSize = stats.maxBlockSize;
@@ -373,9 +377,16 @@ function drawNebulae() {
  * and being drawn live means it can breathe.
  */
 const HALO_SPAN = 1.9;
-let haloSprite = null;
+const haloSprites = new Map();
 
-function buildHalo() {
+/** One sprite per aura colour, built the first time a planet asks for it. */
+function haloFor(auraName) {
+  const existing = haloSprites.get(auraName);
+  if (existing !== undefined) return existing;
+
+  const aura = auras.find((a) => a.name === auraName);
+  const rgb = aura?.rgb ?? "111, 168, 255";
+
   const size = 256;
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -384,15 +395,16 @@ function buildHalo() {
 
   const c = size / 2;
   const gradient = hctx.createRadialGradient(c, c, c / HALO_SPAN, c, c, c);
-  gradient.addColorStop(0, "rgba(111, 168, 255, 0.34)");
-  gradient.addColorStop(0.45, "rgba(111, 168, 255, 0.13)");
-  gradient.addColorStop(1, "rgba(111, 168, 255, 0)");
+  gradient.addColorStop(0, `rgba(${rgb}, 0.34)`);
+  gradient.addColorStop(0.45, `rgba(${rgb}, 0.13)`);
+  gradient.addColorStop(1, `rgba(${rgb}, 0)`);
   hctx.fillStyle = gradient;
   hctx.beginPath();
   hctx.arc(c, c, c, 0, Math.PI * 2);
   hctx.fill();
 
-  haloSprite = canvas;
+  haloSprites.set(auraName, canvas);
+  return canvas;
 }
 
 /**
@@ -489,8 +501,6 @@ function drawPlanetDetail(rect) {
 
 /** Drawn under the planet sheet, so every world sits in its own glow. */
 function drawHalos(rect, seconds) {
-  if (haloSprite === null) return;
-
   for (let i = 0; i < blocks.length; i += 1) {
     const block = blocks[i];
     const r = rectFor(block);
@@ -502,7 +512,7 @@ function drawHalos(rect, seconds) {
     // Each one on its own phase, so the field shimmers rather than pulsing
     // in unison like a warning light.
     ctx.globalAlpha = 0.72 + 0.28 * Math.sin(seconds * 0.6 + i * 1.7);
-    ctx.drawImage(haloSprite, x, y, span, span);
+    ctx.drawImage(haloFor(block.aura ?? "azure"), x, y, span, span);
   }
   ctx.globalAlpha = 1;
 }
@@ -789,18 +799,15 @@ function showBadge(square, clientX, clientY) {
   const free = isFree(square);
   // Display only, and it works for any size because it is derived from the
   // per-tile rate rather than a fixed list of purchasable sizes.
-  const amount = (priceOf(square) / 100).toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
-
+  // No price. Choosing where to be and deciding what it is worth are separate
+  // questions, and this is the first one.
   const middle = Math.floor(square.size / 2);
   const orbit = orbitAt(square.x + middle, square.y + middle);
   const where = orbit === null ? "the void" : orbit.label;
-  const capped = square.size >= maxBlockSize ? " &middot; max" : "";
+  const capped = square.size >= maxBlockSize ? " &middot; max size" : "";
   badge.innerHTML =
-    `${square.size}x${square.size} <small>${amount}/mo &middot; ${where}${capped}</small>`;
+    `${square.size}x${square.size} <small>${square.size * square.size} tiles ` +
+    `&middot; ${where}${capped}</small>`;
   badge.className = free ? "badge" : "badge blocked";
   badge.hidden = false;
   badge.style.left = `${Math.min(clientX + 16, window.innerWidth - 120)}px`;
@@ -1067,7 +1074,6 @@ window.addEventListener("resize", () => {
 await loadStats();
 buildStars();
 buildNebulae();
-buildHalo();
 
 const featured = createFeaturedColumn({
   listEl: document.getElementById("featured-list"),
@@ -1080,7 +1086,7 @@ const featured = createFeaturedColumn({
 });
 
 const checkout = createCheckout({
-  priceOf,
+  settings: () => ({ auras, trialDays }),
   onChange: () => {
     dirty = true;
   },

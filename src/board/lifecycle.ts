@@ -186,9 +186,9 @@ export async function lapseSubscription(
  * cannot sit on the board forever.
  *
  * Webhooks are the fast path, but they can be missed, delayed, or arrive for an
- * event we do not handle. This sweeps on the state we control instead: a live
- * block whose paid period ended more than the grace period ago is released,
- * whatever the provider did or did not tell us.
+ * event we do not handle. This sweeps on the state we control instead: a planet
+ * whose paid period ended more than the grace period ago, or whose free trial
+ * has simply run out, is released whatever the provider did or did not say.
  *
  * Same shape as the reservation sweep: idempotent, and using SKIP LOCKED so it
  * never waits on a transaction that is already dealing with the same row.
@@ -198,15 +198,24 @@ export async function releaseLapsedSubscriptions(
   graceDays: number = SUBSCRIPTION_GRACE_DAYS,
 ): Promise<{ blockIds: string[]; tilesReleased: number }> {
   return withTransaction(pool, async (tx) => {
+    // Two ways a planet stops being paid for: a subscription whose period ended
+    // and was never renewed, and a trial that simply ran out. Both leave a
+    // planet on the board with nothing behind it, so both are swept here.
     const expired = await tx.query<{ id: string }>(
       `UPDATE blocks
           SET status = 'expired', published_at = NULL
         WHERE id IN (
           SELECT id
             FROM blocks
-           WHERE status = 'live'
-             AND current_period_end IS NOT NULL
-             AND current_period_end < now() - make_interval(days => $1::int)
+           WHERE status IN ('live', 'pending_review')
+             AND (
+               (current_period_end IS NOT NULL
+                 AND subscription_id IS NOT NULL
+                 AND current_period_end < now() - make_interval(days => $1::int))
+               OR (trial_ends_at IS NOT NULL
+                 AND subscription_id IS NULL
+                 AND trial_ends_at < now())
+             )
            FOR UPDATE SKIP LOCKED
         )
         RETURNING id`,

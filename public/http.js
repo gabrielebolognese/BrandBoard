@@ -49,6 +49,21 @@ export function postJson(url, payload) {
   });
 }
 
+/**
+ * Raw bytes, for the one thing that is not JSON going up.
+ *
+ * An upload posts the file itself rather than a form encoding, so there is no
+ * filename and no declared type to be wrong about. The answer still comes back
+ * through the same parser, so a failure here is a value like every other.
+ */
+export function postBinary(url, body, contentType) {
+  return request(url, {
+    method: "POST",
+    headers: { "content-type": contentType || "application/octet-stream" },
+    body,
+  });
+}
+
 /** The message a server error carries, or a readable fallback. */
 export function messageFrom(result, fallback) {
   return result.error ?? result.body?.message ?? fallback;

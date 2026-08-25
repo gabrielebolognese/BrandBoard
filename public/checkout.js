@@ -1,31 +1,36 @@
-// Cart and checkout.
+// Choosing a planet, dressing it, and paying for it.
 //
-// Owns everything between choosing a square and handing off to the payment
-// provider: what is in the cart, what the server priced it at, and the three
-// states the dialog can be in. The board knows none of this; it calls add()
-// and asks which squares are spoken for.
+// The order of those matters. Price is not shown while someone is picking a
+// spot, or in the cart, or while they are filling in who they are: deciding
+// where you want to be and deciding whether it is worth it are different
+// questions, and a number on screen during the first one makes it the only
+// question. The figure appears once, at the end, beside what it buys.
 //
-// Two round trips, each meaning something:
-//   review  -> nothing is held, prices are indicative
-//   reserve -> tiles are held atomically and the server returns the real price
-//   pay     -> hand off to the provider
+// Four steps, each meaning something:
+//   cart     -> nothing held, nothing priced
+//   reserve  -> tiles held atomically, and the clock starts
+//   details  -> the photo, the aura, the link, the description
+//   payment  -> the price, the reach, and the two ways to go live
 //
-// The prices rendered after reserving are the server's. The figures shown
-// before that are a preview, and are labelled as one.
+// Reserving before the form is deliberate. Filling in a listing takes minutes,
+// and nobody should lose the square they chose while typing.
 
-import { messageFrom, postJson } from "./http.js";
+import { messageFrom, postBinary, postJson } from "./http.js";
 import { createModal } from "./modal.js";
 
-export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
+export function createCheckout({ settings, onChange, onReserved, onConflict }) {
   let items = [];
   let session = null;
-  let step = "review";
-  let payState = { status: "idle" };
+  let step = "details";
   let holdTimer = 0;
 
+  const listing = { name: "", url: "", description: "", aura: "azure", photo: null };
+  let uploaded = false;
+  let payState = { status: "idle" };
+
   const modal = createModal({
-    title: "Your order",
-    width: 470,
+    title: "Your planet",
+    width: 460,
     onClose: () => {
       window.clearInterval(holdTimer);
       holdTimer = 0;
@@ -36,40 +41,38 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
   launcher.type = "button";
   launcher.className = "cart-launcher";
   launcher.hidden = true;
-  launcher.addEventListener("click", () => openAt("review"));
+  launcher.addEventListener("click", () => void proceed());
   document.body.append(launcher);
 
   // -------------------------------------------------------------------------
-  // Cart
+  // The cart
   // -------------------------------------------------------------------------
 
   function add(square) {
     items = [...items, square];
     session = null;
-    step = "review";
     renderLauncher();
     onChange?.();
   }
 
   function remove(index) {
     items = items.filter((_, i) => i !== index);
-    if (items.length === 0) modal.close();
     renderLauncher();
-    render();
     onChange?.();
   }
 
   function clear() {
     items = [];
     session = null;
-    step = "review";
+    step = "details";
+    uploaded = false;
     payState = { status: "idle" };
     renderLauncher();
     modal.close();
     onChange?.();
   }
 
-  /** Squares the board should draw as pending: cart, or a live reservation. */
+  /** Squares the board draws as pending: chosen, or held by a live order. */
   function pending() {
     if (session !== null) {
       return session.lines.map((line) => ({ x: line.x, y: line.y, size: line.size }));
@@ -87,14 +90,11 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Rendering
-  // -------------------------------------------------------------------------
-
   function money(cents) {
     return (cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" });
   }
 
+  /** No price here on purpose: what is chosen, and the way forward. */
   function renderLauncher() {
     if (items.length === 0 && session === null) {
       launcher.hidden = true;
@@ -102,39 +102,264 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
     }
     launcher.hidden = false;
 
+    const count = session !== null ? session.lines.length : items.length;
+    launcher.innerHTML =
+      `<span class="cart-count">${count}</span>` +
+      `<span>${count === 1 ? "planet" : "planets"} ${session !== null ? "held" : "chosen"}</span>` +
+      `<span class="cart-go">${session !== null ? "Continue" : "Proceed"}</span>`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Reserving
+  // -------------------------------------------------------------------------
+
+  async function proceed() {
     if (session !== null) {
-      launcher.innerHTML =
-        `<span class="cart-count">${session.lines.length}</span>` +
-        `<span>Reserved</span>` +
-        `<span class="cart-total">${money(session.monthlyTotalCents)}/mo</span>` +
-        `<span class="cart-go">Proceed</span>`;
+      render();
+      modal.open();
+      return;
+    }
+    if (items.length === 0) return;
+
+    launcher.disabled = true;
+    const response = await postJson("/api/checkout", { placements: items });
+    launcher.disabled = false;
+
+    if (response.status === 201 && response.body !== null) {
+      session = response.body;
+      items = [];
+      step = "details";
+      renderLauncher();
+      await onReserved?.();
+      onChange?.();
+      render();
+      modal.open();
       return;
     }
 
-    const total = items.reduce((sum, i) => sum + priceOf(i), 0);
-    launcher.innerHTML =
-      `<span class="cart-count">${items.length}</span>` +
-      `<span>${items.length === 1 ? "planet" : "planets"} selected</span>` +
-      `<span class="cart-total">${money(total)}/mo</span>` +
-      `<span class="cart-go">Proceed</span>`;
-  }
-
-  function openAt(next) {
-    step = next;
-    render();
-    modal.open();
+    // The board's map of what is free is a hint; the server decides. Nothing
+    // was held, so the choice is left exactly as it was.
+    if (response.status === 409 && response.body !== null) {
+      onConflict?.(response.body);
+      return;
+    }
+    onConflict?.({ message: messageFrom(response, "Those spots could not be held.") });
   }
 
   function render() {
-    if (step === "review") return renderReview();
-    return renderPayment();
+    if (session === null) return;
+    if (step === "payment") return renderPayment();
+    return renderDetails();
   }
 
-  function summaryRows(lines, { removable = false } = {}) {
+  // -------------------------------------------------------------------------
+  // Step one: what the planet looks like
+  // -------------------------------------------------------------------------
+
+  function renderDetails() {
+    modal.setTitle("Your planet");
+    modal.body.textContent = "";
+
+    const preview = document.createElement("div");
+    preview.className = "planet-preview";
+    const orb = document.createElement("div");
+    orb.className = "planet-orb";
+    orb.id = "planet-orb";
+    const hint = document.createElement("p");
+    hint.className = "preview-hint";
+    hint.id = "preview-hint";
+    hint.textContent = "Add a photo to see your planet";
+    preview.append(orb, hint);
+    modal.body.append(preview);
+
+    const photoField = document.createElement("div");
+    photoField.className = "field";
+    const photoLabel = document.createElement("label");
+    photoLabel.textContent = "Photo";
+    photoField.append(photoLabel);
+
+    const picker = document.createElement("label");
+    picker.className = "filepick";
+    picker.textContent = uploaded ? "Change image" : "Choose an image";
+    const file = document.createElement("input");
+    file.type = "file";
+    file.accept = "image/*";
+    file.addEventListener("change", () => {
+      const chosen = file.files?.[0];
+      if (chosen !== undefined) void takePhoto(chosen);
+    });
+    picker.append(file);
+    photoField.append(picker);
+    modal.body.append(photoField);
+
+    const auraField = document.createElement("div");
+    auraField.className = "field";
+    const auraLabel = document.createElement("label");
+    auraLabel.textContent = "Aura";
+    auraField.append(auraLabel);
+
+    const swatches = document.createElement("div");
+    swatches.className = "auras";
+    for (const aura of settings().auras ?? []) {
+      const swatch = document.createElement("button");
+      swatch.type = "button";
+      swatch.className = "aura";
+      swatch.title = aura.label;
+      swatch.setAttribute("aria-label", aura.label);
+      swatch.setAttribute("aria-pressed", String(aura.name === listing.aura));
+      swatch.style.setProperty("--aura", `rgb(${aura.rgb})`);
+      swatch.addEventListener("click", () => {
+        listing.aura = aura.name;
+        for (const other of swatches.children) {
+          other.setAttribute("aria-pressed", String(other === swatch));
+        }
+        paintPreview();
+      });
+      swatches.append(swatch);
+    }
+    auraField.append(swatches);
+    modal.body.append(auraField);
+
+    modal.body.append(
+      textField("Name", "text", listing.name, 60, "How you are known", (value) => {
+        listing.name = value;
+        refreshNext();
+      }),
+    );
+    modal.body.append(
+      textField("Link", "url", listing.url, 300, "yoursite.com", (value) => {
+        listing.url = value;
+        refreshNext();
+      }),
+    );
+    modal.body.append(
+      textField("Description", "textarea", listing.description, 280, "One line about you", (v) => {
+        listing.description = v;
+      }),
+    );
+
+    modal.footer.textContent = "";
+
+    const hold = document.createElement("p");
+    hold.className = "hold";
+    modal.footer.append(hold);
+    startCountdown(hold);
+
+    const next = button("primary", "Next");
+    next.id = "details-next";
+    next.addEventListener("click", () => void saveAndContinue(next));
+    modal.footer.append(next);
+
+    modal.footer.append(
+      caption("Nothing is charged yet. Your spot is held while you fill this in."),
+    );
+
+    paintPreview();
+    refreshNext();
+  }
+
+  function textField(label, kind, value, maxLength, placeholder, onInput) {
+    const field = document.createElement("div");
+    field.className = "field";
+    const tag = document.createElement("label");
+    tag.textContent = label;
+    field.append(tag);
+
+    const input = document.createElement(kind === "textarea" ? "textarea" : "input");
+    if (kind !== "textarea") input.type = kind;
+    if (kind === "textarea") input.rows = 2;
+    input.className = "input";
+    input.value = value;
+    input.maxLength = maxLength;
+    input.placeholder = placeholder;
+    input.addEventListener("input", () => onInput(input.value));
+    field.append(input);
+    return field;
+  }
+
+  function refreshNext() {
+    const next = document.getElementById("details-next");
+    if (next === null) return;
+    const ready = uploaded && listing.name.trim() !== "" && listing.url.trim() !== "";
+    next.disabled = !ready;
+    next.textContent = ready ? "Next" : "Add a photo, a name and a link";
+  }
+
+  /** The planet as it will look: the photo, inside its chosen aura. */
+  function paintPreview() {
+    const orb = document.getElementById("planet-orb");
+    if (orb === null) return;
+    const aura = (settings().auras ?? []).find((a) => a.name === listing.aura);
+    const rgb = aura?.rgb ?? "96, 165, 250";
+    orb.style.boxShadow = `0 0 44px 10px rgba(${rgb}, 0.45), 0 0 96px 34px rgba(${rgb}, 0.18)`;
+    if (listing.photo !== null) {
+      orb.style.backgroundImage = `url(${listing.photo})`;
+      orb.classList.add("has-photo");
+    }
+  }
+
+  async function takePhoto(chosen) {
+    // Show it straight away from the local file; the upload confirms it.
+    listing.photo = URL.createObjectURL(chosen);
+    paintPreview();
+    say("Uploading...");
+
+    const response = await postBinary(`/api/upload/${session.id}`, chosen, chosen.type);
+
+    if (response.status !== 201) {
+      uploaded = false;
+      listing.photo = null;
+      document.getElementById("planet-orb")?.classList.remove("has-photo");
+      say(messageFrom(response, "That image was not accepted."));
+      refreshNext();
+      return;
+    }
+
+    uploaded = true;
+    say("This is how it will look");
+    refreshNext();
+  }
+
+  function say(text) {
+    const hint = document.getElementById("preview-hint");
+    if (hint !== null) hint.textContent = text;
+  }
+
+  async function saveAndContinue(trigger) {
+    trigger.disabled = true;
+    trigger.textContent = "Saving...";
+
+    const response = await postJson(`/api/listing/${session.id}`, {
+      displayName: listing.name,
+      primaryUrl: listing.url,
+      description: listing.description,
+      aura: listing.aura,
+    });
+
+    if (response.status !== 200) {
+      trigger.disabled = false;
+      refreshNext();
+      modal.footer.prepend(
+        result("Could not save", messageFrom(response, "Check the details and try again.")),
+      );
+      return;
+    }
+
+    step = "payment";
+    render();
+  }
+
+  // -------------------------------------------------------------------------
+  // Step two: what it costs, and what it is worth
+  // -------------------------------------------------------------------------
+
+  function renderPayment() {
+    modal.setTitle("Go live");
+    modal.body.textContent = "";
+
     const list = document.createElement("ul");
     list.className = "summary";
-
-    lines.forEach((line, index) => {
+    for (const line of session.lines) {
       const row = document.createElement("li");
       row.className = "summary-row";
 
@@ -144,129 +369,151 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
 
       const label = document.createElement("span");
       label.className = "summary-label";
-      label.innerHTML =
-        `<span class="summary-name">${line.size}×${line.size} block</span>` +
-        `<span class="summary-meta">Position ${line.x}, ${line.y} &middot; ${line.tiles} tiles</span>`;
+      const name = document.createElement("span");
+      name.className = "summary-name";
+      name.textContent = `${line.size}×${line.size} planet`;
+      const meta = document.createElement("span");
+      meta.className = "summary-meta";
+      meta.textContent = `${line.orbit} · ${line.tiles} tiles`;
+      label.append(name, meta);
 
       const price = document.createElement("span");
       price.className = "summary-price";
       price.textContent = `${money(line.monthlyCents)}/mo`;
 
       row.append(swatch, label, price);
-
-      if (removable) {
-        const drop = document.createElement("button");
-        drop.type = "button";
-        drop.className = "summary-remove";
-        drop.setAttribute("aria-label", `Remove the ${line.size} by ${line.size} planet`);
-        drop.innerHTML = "&times;";
-        drop.addEventListener("click", () => remove(index));
-        row.append(drop);
-      }
       list.append(row);
-    });
+    }
+    modal.body.append(list);
 
-    return list;
-  }
+    if (session.reach !== undefined) {
+      const reach = document.createElement("div");
+      reach.className = "reach";
+      const figure = document.createElement("strong");
+      figure.textContent =
+        `${session.reach.low.toLocaleString()} to ${session.reach.high.toLocaleString()}` +
+        " clicks a month";
+      const basis = document.createElement("span");
+      // Said plainly: a projection, not a promise.
+      basis.textContent = `Projected from ${session.reach.basis}. Not a guarantee.`;
+      reach.append(figure, basis);
+      modal.body.append(reach);
+    }
 
-  function totals(lines, monthlyTotal, { indicative }) {
-    const tiles = lines.reduce((sum, line) => sum + line.tiles, 0);
-    const wrap = document.createElement("div");
-    wrap.className = "totals";
-
-    wrap.append(
-      totalLine("Planets", String(lines.length)),
-      totalLine("Tiles", tiles.toLocaleString()),
-      totalLine("Billing", "Monthly, recurring"),
-    );
-
+    const totals = document.createElement("div");
+    totals.className = "totals";
     const grand = document.createElement("div");
     grand.className = "totals-row totals-grand";
     grand.innerHTML =
-      `<span>${indicative ? "Estimated total" : "Total"}</span>` +
-      `<span class="totals-amount">${money(monthlyTotal)}<small>/mo</small></span>`;
-    wrap.append(grand);
-    return wrap;
-  }
-
-  function totalLine(label, value) {
-    const row = document.createElement("div");
-    row.className = "totals-row";
-    row.innerHTML = `<span>${label}</span><span>${value}</span>`;
-    return row;
-  }
-
-  function renderReview() {
-    modal.setTitle("Your order");
-    const lines = items.map((item) => ({
-      ...item,
-      tiles: item.size * item.size,
-      monthlyCents: priceOf(item),
-    }));
-    const total = lines.reduce((sum, line) => sum + line.monthlyCents, 0);
-
-    modal.body.textContent = "";
-    modal.body.append(summaryRows(lines, { removable: true }));
-    modal.body.append(totals(lines, total, { indicative: true }));
+      `<span>Total</span><span class="totals-amount">${money(session.monthlyTotalCents)}` +
+      `<small>/mo</small></span>`;
+    totals.append(grand);
+    modal.body.append(totals);
 
     modal.footer.textContent = "";
 
-    const reserve = button("primary", "Reserve orbit and continue");
-    reserve.addEventListener("click", () => void doReserve(reserve));
-    modal.footer.append(reserve);
-
-    modal.footer.append(
-      caption(
-        "Reserving holds these tiles for 15 minutes while you pay. " +
-          "Nothing is charged at this step.",
-      ),
-    );
-  }
-
-  function renderPayment() {
-    modal.setTitle("Checkout");
-    modal.body.textContent = "";
-    modal.body.append(summaryRows(session.lines));
-    modal.body.append(totals(session.lines, session.monthlyTotalCents, { indicative: false }));
-
-    const hold = document.createElement("p");
-    hold.className = "hold";
-    modal.body.append(hold);
-    startCountdown(hold);
-
-    modal.footer.textContent = "";
+    if (payState.status !== "trialling") {
+      const hold = document.createElement("p");
+      hold.className = "hold";
+      modal.footer.append(hold);
+      startCountdown(hold);
+    }
 
     if (payState.status === "unavailable") {
       modal.footer.append(
         result(
           "Payment is not connected",
-          `This order is valid and your tiles are held, but ${session.provider} has not been ` +
-            "wired up yet, so nothing was charged.",
+          "Your order is valid and your tiles are held, but the payment provider is not " +
+            "wired up yet, so nothing was charged. The free trial works in the meantime.",
         ),
       );
     } else if (payState.status === "error") {
       modal.footer.append(result("Could not start payment", payState.message));
+    } else if (payState.status === "trialling") {
+      modal.footer.append(
+        result("You are live", `Your planet is in review. The trial runs until ${payState.until}.`),
+      );
     }
 
-    const pay = button("primary", `Pay ${money(session.monthlyTotalCents)} per month`);
-    if (payState.status === "working") {
-      pay.disabled = true;
-      pay.textContent = "Contacting payment provider...";
-    }
-    pay.addEventListener("click", () => void doPay(pay));
-    modal.footer.append(pay);
+    if (payState.status !== "trialling") {
+      const pay = button("primary", `Pay ${money(session.monthlyTotalCents)} per month`);
+      if (payState.status === "working") {
+        pay.disabled = true;
+        pay.textContent = "Contacting payment provider...";
+      }
+      pay.addEventListener("click", () => void doPay(pay));
+      modal.footer.append(pay);
 
-    const cancel = button("ghost", "Keep browsing");
-    cancel.addEventListener("click", () => modal.close());
-    modal.footer.append(cancel);
+      const trial = button("ghost", `Start a ${session.trialDays ?? 3} day free trial instead`);
+      trial.addEventListener("click", () => void doTrial(trial));
+      modal.footer.append(trial);
+    }
+
+    const back = button("ghost", payState.status === "trialling" ? "Done" : "Back");
+    back.addEventListener("click", () => {
+      if (payState.status === "trialling") {
+        clear();
+        return;
+      }
+      step = "details";
+      render();
+    });
+    modal.footer.append(back);
 
     modal.footer.append(
       caption(
-        `Order ${session.id.slice(0, 16)}. ` +
-          `${money(session.rateCentsPerTilePerMonth)} per tile per month` +
-          `${session.rateIsPlaceholder ? ", placeholder pricing" : ""}.`,
+        `Order ${session.id.slice(0, 16)}. Billed monthly, cancel any time. ` +
+          "Your planet goes into review before it appears.",
       ),
     );
+  }
+
+  async function doPay(trigger) {
+    payState = { status: "working" };
+    trigger.disabled = true;
+
+    const response = await postJson(`/api/checkout/${session.id}/pay`);
+    const body = response.body;
+
+    if (response.status === 200 && body?.redirectUrl !== undefined) {
+      window.location.href = body.redirectUrl;
+      return;
+    }
+    if (response.status === 410) {
+      onConflict?.({ message: messageFrom(response, "The hold expired.") });
+      clear();
+      await onReserved?.();
+      return;
+    }
+
+    payState =
+      response.status === 503
+        ? { status: "unavailable" }
+        : { status: "error", message: messageFrom(response, "Payment could not be started.") };
+    render();
+  }
+
+  async function doTrial(trigger) {
+    trigger.disabled = true;
+    trigger.textContent = "Starting...";
+
+    const response = await postJson(`/api/checkout/${session.id}/trial`);
+    if (response.status !== 201 || response.body === null) {
+      trigger.disabled = false;
+      render();
+      modal.footer.prepend(
+        result("Could not start the trial", messageFrom(response, "That was refused.")),
+      );
+      return;
+    }
+
+    payState = {
+      status: "trialling",
+      until: new Date(response.body.trialEndsAt).toLocaleString(),
+    };
+    window.clearInterval(holdTimer);
+    await onReserved?.();
+    render();
   }
 
   function startCountdown(node) {
@@ -275,7 +522,7 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
       const left = new Date(session.expiresAt).getTime() - Date.now();
       if (left <= 0) {
         node.className = "hold hold-expired";
-        node.textContent = "The hold on these tiles has expired and they are back on sale.";
+        node.textContent = "The hold on these tiles has expired.";
         window.clearInterval(holdTimer);
         void onReserved?.();
         return;
@@ -283,91 +530,10 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
       const m = Math.floor(left / 60000);
       const s = Math.floor((left % 60000) / 1000);
       node.className = "hold";
-      node.innerHTML = `Tiles held for <b>${m}:${String(s).padStart(2, "0")}</b>`;
+      node.innerHTML = `Held for <b>${m}:${String(s).padStart(2, "0")}</b>`;
     };
     tick();
     holdTimer = window.setInterval(tick, 1000);
-  }
-
-  // -------------------------------------------------------------------------
-  // Server
-  // -------------------------------------------------------------------------
-
-  async function doReserve(trigger) {
-    trigger.disabled = true;
-    trigger.textContent = "Reserving...";
-
-    const response = await postJson("/api/checkout", { placements: items });
-    const body = response.body;
-
-    if (response.status === 201 && body !== null) {
-      session = body;
-      items = [];
-      payState = { status: "idle" };
-      step = "payment";
-      renderLauncher();
-      await onReserved?.();
-      render();
-      onChange?.();
-      return;
-    }
-
-    // The board's availability map is a hint; the server decides. Nothing was
-    // reserved, so the cart is left exactly as it was.
-    trigger.disabled = false;
-    trigger.textContent = "Reserve orbit and continue";
-    if (response.status === 409 && body !== null) {
-      onConflict?.(body);
-      modal.close();
-      return;
-    }
-    modal.footer.prepend(
-      result("Could not reserve", messageFrom(response, "That order was rejected.")),
-    );
-  }
-
-  async function doPay(trigger) {
-    payState = { status: "working" };
-    trigger.disabled = true;
-    trigger.textContent = "Contacting payment provider...";
-
-    const response = await postJson(`/api/checkout/${session.id}/pay`);
-    const body = response.body;
-
-    if (response.status === 0 || response.error !== null) {
-      payState = { status: "error", message: messageFrom(response, "Could not reach the server.") };
-      render();
-      return;
-    }
-
-    // What a wired-up provider will return: somewhere to send the buyer.
-    if (response.status === 200 && body?.redirectUrl !== undefined) {
-      window.location.href = body.redirectUrl;
-      return;
-    }
-
-    // 503 is the honest answer while the provider is unconfigured: the order is
-    // real, the tiles are held, and no charge was attempted.
-    payState =
-      response.status === 503
-        ? { status: "unavailable" }
-        : { status: "error", message: messageFrom(response, "Payment could not be started.") };
-
-    if (response.status === 410) {
-      // The hold lapsed. The order is gone, so drop it rather than showing a
-      // pay button for tiles somebody else can now buy.
-      session = null;
-      step = "review";
-      payState = { status: "idle" };
-      renderLauncher();
-      await onReserved?.();
-      modal.close();
-      onConflict?.({
-        message: messageFrom(response, "The hold expired and the tiles were released."),
-      });
-      return;
-    }
-    render();
   }
 
   // -------------------------------------------------------------------------
@@ -389,13 +555,6 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
     return el;
   }
 
-  function notice(text) {
-    const el = document.createElement("p");
-    el.className = "notice";
-    el.textContent = text;
-    return el;
-  }
-
   function result(title, detail) {
     const el = document.createElement("div");
     el.className = "result";
@@ -407,5 +566,5 @@ export function createCheckout({ priceOf, onChange, onReserved, onConflict }) {
     return el;
   }
 
-  return { add, remove, clear, claims, pending, open: () => openAt(step), items: () => items };
+  return { add, remove, clear, claims, pending, open: proceed, items: () => items };
 }

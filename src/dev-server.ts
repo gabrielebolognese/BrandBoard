@@ -16,6 +16,15 @@ import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
 import { lapseSubscription, releaseLapsedSubscriptions } from "./board/lifecycle.js";
+import {
+  ListingRejected,
+  MAX_UPLOAD_BYTES,
+  TrialRefused,
+  UploadRejected,
+  saveListing,
+  startTrial,
+  storeAvatar,
+} from "./board/listing.js";
 import { markEventProcessed, recordWebhookEvent } from "./payments/events.js";
 import { fulfilPayment } from "./payments/fulfilment.js";
 import { verifyWebhookSignature } from "./payments/signature.js";
@@ -29,6 +38,7 @@ import {
 import { availabilityBitmap, buildManifest, heldTileCount } from "./board/manifest.js";
 import { currentlyWatching, startWatchingTicker } from "./board/watching.js";
 import {
+  AURAS,
   BILLING_PERIOD,
   BOARD_CENTER,
   BOARD_SIZE,
@@ -41,6 +51,8 @@ import {
   TILE_INSET,
   TILE_PIXELS,
   UNIVERSE_RADIUS,
+  TRIAL_DAYS,
+  estimatedMonthlyClicks,
   featuredPriceCents,
   isValidFeaturedDays,
   monthlyPriceCents,
@@ -237,6 +249,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (path === "/api/checkout") return checkout(req, res);
     if (path === "/api/featured") return buyFeatured(req, res);
     if (path === "/api/webhooks/paddle") return paddleWebhook(req, res);
+
+    const upload = /^\/api\/upload\/(chk_[0-9a-f-]{36})$/.exec(path);
+    if (upload?.[1] !== undefined) return uploadAvatar(req, res, upload[1]);
+
+    const listing = /^\/api\/listing\/(chk_[0-9a-f-]{36})$/.exec(path);
+    if (listing?.[1] !== undefined) return putListing(req, res, listing[1]);
+
+    const trial = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/trial$/.exec(path);
+    if (trial?.[1] !== undefined) return beginTrial(res, trial[1]);
     if (path === "/api/sweep/subscriptions") {
       return sendJson(res, 200, await releaseLapsedSubscriptions(pool));
     }
@@ -418,6 +439,8 @@ async function stats(pool: Pool): Promise<unknown> {
     // The orbits, so the client can draw them and price a drag as it happens.
     // What is actually charged is still computed server side at checkout.
     orbits: ORBITS,
+    auras: AURAS,
+    trialDays: TRIAL_DAYS,
     billingPeriod: BILLING_PERIOD,
   };
 }
@@ -474,7 +497,20 @@ async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void
 
   try {
     const session = await createCheckout(pool, devUserId, placements);
-    return sendJson(res, 201, session);
+    // What the order might actually be worth, alongside what it costs. Clearly
+    // a projection: nothing has measured a click yet.
+    const reach = session.lines.map((line) =>
+      estimatedMonthlyClicks(line.x, line.y, line.size, currentlyWatching()),
+    );
+    return sendJson(res, 201, {
+      ...session,
+      trialDays: TRIAL_DAYS,
+      reach: {
+        low: reach.reduce((sum, r) => sum + r.low, 0),
+        high: reach.reduce((sum, r) => sum + r.high, 0),
+        basis: reach[0]?.basis ?? "",
+      },
+    });
   } catch (error) {
     if (error instanceof TileConflictError) {
       return sendJson(res, error.status, {
@@ -489,6 +525,112 @@ async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void
     }
     throw error;
   }
+}
+
+/**
+ * The cover photo for an order's planets.
+ *
+ * Takes the raw bytes rather than a form encoding, so there is no filename and
+ * no declared type to be wrong about. Whatever arrives is decoded, measured,
+ * and re-encoded into one known-good square WebP before it is stored; see
+ * normaliseAvatar for why that matters more than any of the checks around it.
+ */
+async function uploadAvatar(
+  req: IncomingMessage,
+  res: ServerResponse,
+  checkoutId: string,
+): Promise<void> {
+  const blocks = await readCheckout(pool, checkoutId);
+  if (blocks.length === 0) return sendJson(res, 404, { error: "unknown_checkout" });
+
+  let bytes: Buffer;
+  try {
+    bytes = await readRawBinary(req, MAX_UPLOAD_BYTES);
+  } catch (error) {
+    return badRequest(res, error);
+  }
+
+  try {
+    // Every planet in the order wears the same face, stored once per planet
+    // because the compositor looks images up by block.
+    let stored = { imageUrl: "", storedBytes: 0 };
+    for (const block of blocks) {
+      stored = await storeAvatar(AVATAR_DIR, block.id, bytes);
+      // Writing the file is not the same as having a listing with a photo.
+      // Without this the planet has an image on disk that nothing points at.
+      await pool.query(`UPDATE blocks SET image_url = $2 WHERE id = $1`, [
+        block.id,
+        stored.imageUrl,
+      ]);
+    }
+    invalidateCompositeBoard();
+    return sendJson(res, 201, { ...stored, planets: blocks.length });
+  } catch (error) {
+    if (error instanceof UploadRejected) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
+  }
+}
+
+/** Name, link, description and aura, applied to every planet in the order. */
+async function putListing(
+  req: IncomingMessage,
+  res: ServerResponse,
+  checkoutId: string,
+): Promise<void> {
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(req);
+  } catch (error) {
+    return badRequest(res, error);
+  }
+
+  try {
+    const result = await saveListing(pool, checkoutId, {
+      displayName: String(body["displayName"] ?? ""),
+      primaryUrl: String(body["primaryUrl"] ?? ""),
+      description: String(body["description"] ?? ""),
+      aura: String(body["aura"] ?? ""),
+      ...(typeof body["handle"] === "string" ? { handle: body["handle"] } : {}),
+    });
+    invalidateCompositeBoard();
+    return sendJson(res, 200, result);
+  } catch (error) {
+    if (error instanceof ListingRejected) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
+  }
+}
+
+/** Three days on the board without paying, once per account. */
+async function beginTrial(res: ServerResponse, checkoutId: string): Promise<void> {
+  try {
+    const result = await startTrial(pool, devUserId, checkoutId);
+    invalidateCompositeBoard();
+    return sendJson(res, 201, { ...result, trialDays: TRIAL_DAYS });
+  } catch (error) {
+    if (error instanceof TrialRefused) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
+  }
+}
+
+/** Raw bytes, bounded. Used by uploads, where there is nothing to parse. */
+async function readRawBinary(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > maxBytes) {
+      throw new BadRequestError(`Images must be ${maxBytes / 1024 / 1024}MB or smaller.`, 413);
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
 }
 
 /**

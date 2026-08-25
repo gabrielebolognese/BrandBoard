@@ -47,13 +47,18 @@ CREATE OR REPLACE FUNCTION max_block_size() RETURNS smallint
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS users (
-  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  x_handle    text,
-  x_user_id   text UNIQUE,
-  email       text,
-  avatar_url  text,
-  is_admin    boolean NOT NULL DEFAULT false,
-  created_at  timestamptz NOT NULL DEFAULT now(),
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  x_handle      text,
+  x_user_id     text UNIQUE,
+  email         text,
+  avatar_url    text,
+  is_admin      boolean NOT NULL DEFAULT false,
+
+  -- One free trial per account, ever. Without this the trial is just a way to
+  -- hold tiles forever for nothing.
+  trial_used_at timestamptz,
+
+  created_at    timestamptz NOT NULL DEFAULT now(),
 
   -- X OAuth is primary, magic link is the fallback; one of them must identify
   -- the row or there is no way to sign back in.
@@ -89,8 +94,17 @@ CREATE TABLE IF NOT EXISTS blocks (
   display_name        text,
   handle              text,
   primary_url         text,                -- where the click goes
+  description         text,
   links               jsonb NOT NULL DEFAULT '{}'::jsonb,
   category            text,
+
+  -- The colour of the halo this planet sits in. One of a fixed set, checked
+  -- here rather than trusted, because it is rendered into a public page.
+  aura                text NOT NULL DEFAULT 'azure',
+
+  -- Set when a planet goes live without payment. Once it passes, the planet is
+  -- released by the same sweep that handles a lapsed subscription.
+  trial_ends_at       timestamptz,
 
   -- Blocks are rented monthly, so a live block has a subscription behind it and
   -- a period it is paid through. Both stay null until the payment provider says
@@ -145,7 +159,13 @@ CREATE TABLE IF NOT EXISTS blocks (
     CHECK (published_at IS NULL OR status = 'live'),
 
   CONSTRAINT blocks_click_count_non_negative
-    CHECK (click_count >= 0)
+    CHECK (click_count >= 0),
+
+  CONSTRAINT blocks_aura_known
+    CHECK (aura IN ('violet', 'azure', 'cyan', 'emerald', 'amber', 'rose', 'pearl')),
+
+  CONSTRAINT blocks_description_length
+    CHECK (description IS NULL OR length(description) <= 280)
 );
 
 CREATE INDEX IF NOT EXISTS blocks_user_id_idx ON blocks (user_id);
@@ -336,6 +356,28 @@ DO $$ BEGIN
     CHECK (fits_in_universe(x::numeric, y::numeric, size::numeric));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
+-- Listing detail, aura and trials arrived after the first schema.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS description text;
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS aura text NOT NULL DEFAULT 'azure';
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS trial_ends_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_used_at timestamptz;
+
+DO $$ BEGIN
+  ALTER TABLE blocks ADD CONSTRAINT blocks_aura_known
+    CHECK (aura IN ('violet', 'azure', 'cyan', 'emerald', 'amber', 'rose', 'pearl'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE blocks ADD CONSTRAINT blocks_description_length
+    CHECK (description IS NULL OR length(description) <= 280);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Drives the trial sweep.
+CREATE INDEX IF NOT EXISTS blocks_trial_end_idx
+  ON blocks (trial_ends_at) WHERE trial_ends_at IS NOT NULL;
 
 -- Monthly billing arrived after the first schema.
 ALTER TABLE blocks ADD COLUMN IF NOT EXISTS subscription_id text;
