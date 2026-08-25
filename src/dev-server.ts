@@ -10,6 +10,10 @@ import { ClaimError, TileConflictError } from "./board/errors.js";
 import { isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
+import { lapseSubscription, releaseLapsedSubscriptions } from "./board/lifecycle.js";
+import { markEventProcessed, recordWebhookEvent } from "./payments/events.js";
+import { fulfilPayment } from "./payments/fulfilment.js";
+import { verifyWebhookSignature } from "./payments/signature.js";
 import {
   BlockNotLiveError,
   InvalidFeaturedDaysError,
@@ -91,6 +95,27 @@ const initial = await getCompositeBoard(pool, avatars);
 console.log(`${(initial.webp.length / 1024).toFixed(0)}KB webp, ${initial.blocks} avatars`);
 
 startWatchingTicker();
+
+/**
+ * Both sweeps, on a timer.
+ *
+ * Reservations lapse in minutes so that one runs often; subscriptions lapse in
+ * days so that one does not need to. Each is idempotent and each is also
+ * reachable over HTTP, so neither depends on this timer being alive.
+ */
+const reservationSweep = setInterval(() => {
+  void runReservationSweep(pool).catch((error: unknown) => {
+    console.error("reservation sweep failed:", error);
+  });
+}, 60_000);
+reservationSweep.unref();
+
+const subscriptionSweep = setInterval(() => {
+  void releaseLapsedSubscriptions(pool).catch((error: unknown) => {
+    console.error("subscription sweep failed:", error);
+  });
+}, 10 * 60_000);
+subscriptionSweep.unref();
 
 /**
  * Distinguishes "this request failed" from "the database is gone".
@@ -195,6 +220,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (path === "/api/claim") return claim(req, res);
     if (path === "/api/checkout") return checkout(req, res);
     if (path === "/api/featured") return buyFeatured(req, res);
+    if (path === "/api/webhooks/paddle") return paddleWebhook(req, res);
+    if (path === "/api/sweep/subscriptions") {
+      return sendJson(res, 200, await releaseLapsedSubscriptions(pool));
+    }
 
     const pay = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/pay$/.exec(path);
     if (pay?.[1] !== undefined) return payCheckout(res, pay[1]);
@@ -390,6 +419,179 @@ async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void
     }
     throw error;
   }
+}
+
+/**
+ * The provider's webhook, and the only thing allowed to move a block out of
+ * 'reserved'.
+ *
+ * Order matters and it is the same order for every provider:
+ *
+ *   1. read the raw bytes, because the signature covers those exact bytes and
+ *      a body that has been parsed and re-serialised will not verify
+ *   2. verify the signature, before parsing anything or trusting any field
+ *   3. record the delivery, so a retry of the same event cannot act twice
+ *   4. only then act
+ *
+ * Steps two and three are what make this safe to expose. Without the first, the
+ * second silently never works.
+ */
+async function paddleWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let rawBody: string;
+  try {
+    rawBody = await readRawBody(req);
+  } catch (error) {
+    return badRequest(res, error);
+  }
+
+  const secret = process.env["PADDLE_WEBHOOK_SECRET"];
+  if (secret === undefined || secret === "") {
+    // Refusing beats accepting unsigned deliveries. Paddle is not wired yet, so
+    // this is the expected answer until a secret exists.
+    return sendJson(res, 503, {
+      error: "webhook_secret_not_configured",
+      message:
+        "PADDLE_WEBHOOK_SECRET is not set, so signatures cannot be checked and no delivery " +
+        "will be accepted.",
+    });
+  }
+
+  const signature = verifyWebhookSignature({
+    rawBody,
+    header: header(req, "paddle-signature"),
+    secret,
+  });
+  if (!signature.valid) {
+    // The reason goes to the log, never to the caller: it would tell whoever is
+    // probing exactly which check to defeat next.
+    console.warn(`rejected webhook: ${signature.reason ?? "invalid signature"}`);
+    return sendJson(res, 401, { error: "invalid_signature" });
+  }
+
+  let event: { event_id?: unknown; event_type?: unknown; data?: unknown };
+  try {
+    event = JSON.parse(rawBody) as typeof event;
+  } catch {
+    return sendJson(res, 400, { error: "bad_request", message: "body is not valid JSON" });
+  }
+
+  const eventId = typeof event.event_id === "string" ? event.event_id : null;
+  const eventType = typeof event.event_type === "string" ? event.event_type : null;
+  if (eventId === null || eventType === null) {
+    return sendJson(res, 400, { error: "bad_request", message: "missing event_id or event_type" });
+  }
+
+  const recorded = await recordWebhookEvent(pool, {
+    provider: "paddle",
+    eventId,
+    eventType,
+    payload: event,
+  });
+
+  // A retry. Acknowledge it so the provider stops resending, and change nothing.
+  if (recorded.duplicate) {
+    return sendJson(res, 200, { received: true, duplicate: true, eventId });
+  }
+
+  const outcome = await applyEvent(eventType, event.data);
+  await markEventProcessed(pool, recorded.id, outcome.summary);
+  return sendJson(res, 200, { received: true, duplicate: false, ...outcome.body });
+}
+
+/**
+ * What each event means for the board.
+ *
+ * Amounts are never read from the payload. The payload says which order and
+ * which subscription; what that costs, and what any refund is worth, is derived
+ * from the blocks themselves.
+ */
+async function applyEvent(
+  eventType: string,
+  data: unknown,
+): Promise<{ summary: string; body: Record<string, unknown> }> {
+  const payload = (data ?? {}) as Record<string, unknown>;
+  const rate = tileRate();
+
+  switch (eventType) {
+    case "transaction.completed": {
+      const checkoutId = customData(payload)["checkoutId"];
+      if (typeof checkoutId !== "string") {
+        return { summary: "no checkoutId in custom_data", body: { ignored: true } };
+      }
+
+      const result = await fulfilPayment(pool, {
+        checkoutId,
+        rateCentsPerTilePerMonth: rate.cents,
+        subscriptionId: typeof payload["subscription_id"] === "string" ? payload["subscription_id"] : null,
+        currentPeriodEnd: periodEnd(payload),
+      });
+
+      return {
+        summary:
+          `${result.status}: delivered ${result.delivered.length}, ` +
+          `lost ${result.lost.length}, refund ${result.refundCents}`,
+        body: { fulfilment: result },
+      };
+    }
+
+    case "subscription.canceled":
+    case "subscription.paused": {
+      const id = payload["id"];
+      if (typeof id !== "string") {
+        return { summary: "no subscription id", body: { ignored: true } };
+      }
+      const lapsed = await lapseSubscription(pool, id);
+      return {
+        summary: `lapsed ${lapsed.blocks.length} block(s), freed ${lapsed.tilesReleased} tile(s)`,
+        body: { lapsed },
+      };
+    }
+
+    default:
+      // Recorded, acknowledged, and deliberately not acted on. Everything a
+      // provider sends is stored either way, so an unhandled type is visible.
+      return { summary: `ignored ${eventType}`, body: { ignored: true } };
+  }
+}
+
+function customData(payload: Record<string, unknown>): Record<string, unknown> {
+  const custom = payload["custom_data"];
+  return typeof custom === "object" && custom !== null ? (custom as Record<string, unknown>) : {};
+}
+
+function periodEnd(payload: Record<string, unknown>): Date | null {
+  const period = payload["billing_period"];
+  if (typeof period !== "object" || period === null) return null;
+  const endsAt = (period as Record<string, unknown>)["ends_at"];
+  if (typeof endsAt !== "string") return null;
+  const parsed = new Date(endsAt);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function header(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * The exact bytes, unparsed.
+ *
+ * readJson cannot be reused here: it returns an object, and re-serialising that
+ * object produces different bytes to the ones that were signed. Key order and
+ * whitespace both matter to an HMAC.
+ */
+async function readRawBody(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > MAX_BODY_BYTES) {
+      throw new BadRequestError(`request body exceeds ${MAX_BODY_BYTES} bytes`, 413);
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 /**

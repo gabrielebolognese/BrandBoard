@@ -56,7 +56,8 @@ export async function setupTestDatabase(): Promise<Pool> {
 /** Between tests: empty the board without dropping it. */
 export async function resetBoard(pool: Pool): Promise<void> {
   await pool.query(
-    `TRUNCATE featured_slots, click_events, occupied_tiles, blocks, users RESTART IDENTITY CASCADE`,
+    `TRUNCATE refunds_owed, webhook_events, featured_slots, click_events,
+             occupied_tiles, blocks, users RESTART IDENTITY CASCADE`,
   );
 }
 

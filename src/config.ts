@@ -23,6 +23,15 @@ export const TILE_COUNT = BOARD_SIZE * BOARD_SIZE;
 export const RESERVATION_TTL_MINUTES = 15;
 
 /**
+ * How long a block keeps its square after the period it paid for has ended.
+ *
+ * A card expiring should not cost someone their spot the same hour, and payment
+ * providers retry failed charges for days. Nothing is released until the paid
+ * period ended this long ago.
+ */
+export const SUBSCRIPTION_GRACE_DAYS = 3;
+
+/**
  * Board pixels per tile, and the gap around each tile's square.
  *
  * A tile is drawn as a 20px square with a 1px border, with TILE_INSET of empty

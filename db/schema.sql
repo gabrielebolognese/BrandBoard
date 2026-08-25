@@ -77,7 +77,10 @@ CREATE TABLE IF NOT EXISTS blocks (
   -- Blocks are rented monthly, so a live block has a subscription behind it and
   -- a period it is paid through. Both stay null until the payment provider says
   -- otherwise; wiring them up is Paddle's job.
-  subscription_id     text UNIQUE,
+  --
+  -- Deliberately not unique: one cart is one subscription covering every block
+  -- in it, so several blocks share a subscription_id.
+  subscription_id     text,
   current_period_end  timestamptz,
 
   click_count         integer NOT NULL DEFAULT 0,
@@ -217,6 +220,76 @@ CREATE TABLE IF NOT EXISTS click_events (
 CREATE INDEX IF NOT EXISTS click_events_block_day_idx ON click_events (block_id, day);
 
 -- ---------------------------------------------------------------------------
+-- webhook_events
+-- ---------------------------------------------------------------------------
+--
+-- Payment providers retry. The same event will arrive twice, and publishing a
+-- block twice or refunding twice because of it is not acceptable.
+--
+-- The unique key on (provider, event_id) is what prevents that, in the same way
+-- occupied_tiles prevents double booking: the second delivery is a duplicate
+-- key, refused by storage, whatever the application does. Handlers insert here
+-- first and do nothing if the insert finds a row already there.
+
+CREATE TABLE IF NOT EXISTS webhook_events (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider     text NOT NULL,
+  event_id     text NOT NULL,       -- the provider's id for this delivery
+  event_type   text NOT NULL,
+  payload      jsonb NOT NULL,
+  received_at  timestamptz NOT NULL DEFAULT now(),
+  processed_at timestamptz,
+  outcome      text,                -- what the handler decided, for support
+
+  CONSTRAINT webhook_events_unique_delivery UNIQUE (provider, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS webhook_events_recent_idx
+  ON webhook_events (provider, event_type, received_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- refunds_owed
+-- ---------------------------------------------------------------------------
+--
+-- Money we have taken and must give back, recorded before anyone tries to give
+-- it back. Issuing a refund is a call to a payment provider that can fail; if
+-- the obligation only existed in that call, a failure would lose it silently.
+--
+-- Three things create one: tiles sold out from under a payment that was already
+-- in flight, a listing rejected in review, and a subscription that lapsed with
+-- time already paid for.
+
+DO $$ BEGIN
+  CREATE TYPE refund_reason AS ENUM ('tiles_lost', 'rejected_in_review', 'subscription_lapsed');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS refunds_owed (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  block_id            uuid NOT NULL REFERENCES blocks (id) ON DELETE CASCADE,
+  checkout_session_id text,
+  reason              refund_reason NOT NULL,
+  amount_cents        integer NOT NULL,
+
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  settled_at          timestamptz,
+  provider_ref        text,          -- the provider's refund or adjustment id
+
+  CONSTRAINT refunds_amount_positive CHECK (amount_cents > 0),
+
+  -- A refund is only settled once a provider has confirmed it with an id.
+  CONSTRAINT refunds_settled_has_reference
+    CHECK (settled_at IS NULL OR provider_ref IS NOT NULL),
+
+  -- One obligation per block per cause, so a replayed event cannot owe twice.
+  CONSTRAINT refunds_one_per_block_reason UNIQUE (block_id, reason)
+);
+
+-- Outstanding work only: the settled rows are history and are never scanned.
+CREATE INDEX IF NOT EXISTS refunds_owed_outstanding_idx
+  ON refunds_owed (created_at) WHERE settled_at IS NULL;
+
+-- ---------------------------------------------------------------------------
 -- Migrations for databases created before a change
 -- ---------------------------------------------------------------------------
 --
@@ -239,9 +312,15 @@ END $$;
 ALTER TABLE blocks ADD COLUMN IF NOT EXISTS subscription_id text;
 ALTER TABLE blocks ADD COLUMN IF NOT EXISTS current_period_end timestamptz;
 
-DO $$ BEGIN
-  ALTER TABLE blocks ADD CONSTRAINT blocks_subscription_id_key UNIQUE (subscription_id);
-EXCEPTION WHEN duplicate_table THEN NULL; WHEN duplicate_object THEN NULL;
-END $$;
+-- subscription_id was briefly unique, which is wrong: a cart checks out as one
+-- subscription covering every block in it, so they share the id.
+ALTER TABLE blocks DROP CONSTRAINT IF EXISTS blocks_subscription_id_key;
+
+CREATE INDEX IF NOT EXISTS blocks_subscription_idx
+  ON blocks (subscription_id) WHERE subscription_id IS NOT NULL;
+
+-- Drives the lapse sweep: live blocks whose paid period has ended.
+CREATE INDEX IF NOT EXISTS blocks_period_end_idx
+  ON blocks (current_period_end) WHERE status = 'live';
 
 COMMIT;
