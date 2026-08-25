@@ -1,18 +1,17 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Pool } from "pg";
 import sharp from "sharp";
-import type { OverlayOptions } from "sharp";
+import type { OverlayOptions, Sharp } from "sharp";
 import { BOARD_SIZE, TILE_INSET, TILE_PIXELS } from "../config.js";
 import { boardVersion } from "./manifest.js";
 
 export const BOARD_PIXELS = BOARD_SIZE * TILE_PIXELS; // 2400
 
 /**
- * The board is a universe and a block is a planet.
+ * The worlds, and only the worlds.
  *
- * Only the picture changes. A planet still occupies an N x N square of tiles
+ * A block is a planet, but only the picture changes. A planet still occupies an N x N square of tiles
  * anchored at (x, y), still cannot overlap another, and is still governed by
  * occupied_tiles. The circle is inscribed in that square, so everything that
  * reasons about geometry keeps reasoning in tiles and none of it needed to know
@@ -98,14 +97,6 @@ async function renderBoard(
     const rect = blockRect(block.x, block.y, block.size);
     try {
       const avatar = await avatars.read(block.image_url);
-      const glow = glowFor(rect.side);
-
-      // Halo first, then the lit body over it.
-      layers.push({
-        input: glow.buffer,
-        left: rect.left - glow.pad,
-        top: rect.top - glow.pad,
-      });
       layers.push({
         input: await planet(avatar, rect.side),
         left: rect.left,
@@ -117,9 +108,9 @@ async function renderBoard(
     }
   }
 
-  const webp = await sharp(deepSpace())
+  const webp = await emptySky()
     .composite(layers)
-    .webp({ quality: 88, alphaQuality: 100 })
+    .webp({ quality: 88, alphaQuality: 90 })
     .toBuffer();
 
   return { version, webp, blocks: live.rows.length };
@@ -146,7 +137,6 @@ async function planet(avatar: Buffer, diameter: number): Promise<Buffer> {
 
 const masks = new Map<number, Buffer>();
 const shadings = new Map<number, Buffer>();
-const glows = new Map<number, { buffer: Buffer; pad: number }>();
 
 function maskFor(diameter: number): Buffer {
   const existing = masks.get(diameter);
@@ -195,108 +185,25 @@ function shadingFor(diameter: number): Buffer {
   return buffer;
 }
 
-/** The atmosphere a planet sits in, so it glows rather than being pasted on. */
-function glowFor(diameter: number): { buffer: Buffer; pad: number } {
-  const existing = glows.get(diameter);
-  if (existing !== undefined) return existing;
-
-  const pad = Math.max(6, Math.round(diameter * 0.42));
-  const span = diameter + pad * 2;
-  const c = span / 2;
-  const inner = (diameter / 2 / c) * 100;
-
-  const buffer = Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${span}" height="${span}">
-       <defs>
-         <radialGradient id="halo" cx="50%" cy="50%" r="50%">
-           <stop offset="${(inner * 0.9).toFixed(1)}%" stop-color="#6fa8ff" stop-opacity="0.30"/>
-           <stop offset="${inner.toFixed(1)}%"        stop-color="#6fa8ff" stop-opacity="0.20"/>
-           <stop offset="100%"                        stop-color="#6fa8ff" stop-opacity="0"/>
-         </radialGradient>
-       </defs>
-       <circle cx="${c}" cy="${c}" r="${c}" fill="url(#halo)"/>
-     </svg>`,
-  );
-
-  const entry = { buffer, pad };
-  glows.set(diameter, entry);
-  return entry;
-}
-
 /**
- * Empty space: deep black, nebulae, and a great many distant stars.
+ * Nothing at all, at board size, for the planets to sit on.
  *
- * Opaque on purpose. An alpha channel here, so a live starfield could show
- * through from behind, quadrupled the file to a megabyte: soft halos over
- * transparency compress terribly. The canvas gets the same effect for nothing
- * by drawing its moving stars on top and skipping the ones that land on a
- * planet, which it can test in constant time against the tile index it already
- * keeps.
+ * Hard discs over transparency, which is what compresses: the alpha is flat
+ * everywhere except a few hundred antialiased edges. Soft halos were baked in
+ * here at first and cost more than the planets, the stars and the nebulae put
+ * together, so the client draws them from one cached sprite instead.
  *
- * No grid. Where a tile can be bought is shown by the cursor while placing, not
- * by drawing ten thousand boxes across the sky.
- *
- * Deliberately no grid. Where a tile can be bought is shown by the cursor while
- * placing, not by drawing ten thousand boxes over the sky.
- *
- * Seeded, so the same sky comes back on every render and the image can be
- * cached against the board version rather than changing on every request.
+ * The sky is not in here either. Painting it in made the universe a rectangle
+ * that stopped at its own edge; it belongs to the client, which can draw it
+ * across the whole viewport however far anyone scrolls.
  */
-function deepSpace(): Buffer {
-  const random = seeded(0x5eed_1e55);
-  const stars: string[] = [];
-
-  for (let i = 0; i < 1500; i += 1) {
-    const x = (random() * BOARD_PIXELS).toFixed(1);
-    const y = (random() * BOARD_PIXELS).toFixed(1);
-    const roll = random();
-    // Mostly faint pinpricks, a few bright ones, fewer still with any size.
-    const r = roll > 0.985 ? 1.9 : roll > 0.93 ? 1.25 : roll > 0.7 ? 0.85 : 0.55;
-    const opacity = (0.18 + random() * 0.72).toFixed(2);
-    const tint = roll > 0.9 ? "#cfe4ff" : roll > 0.8 ? "#ffe9d0" : "#ffffff";
-    stars.push(`<circle cx="${x}" cy="${y}" r="${r}" fill="${tint}" opacity="${opacity}"/>`);
-  }
-
-  const nebulae: string[] = [];
-  const hues = [232, 268, 198, 312, 210];
-  for (let i = 0; i < hues.length; i += 1) {
-    const cx = (random() * BOARD_PIXELS).toFixed(0);
-    const cy = (random() * BOARD_PIXELS).toFixed(0);
-    const r = (BOARD_PIXELS * (0.18 + random() * 0.22)).toFixed(0);
-    nebulae.push(
-      `<radialGradient id="neb${i}" cx="50%" cy="50%" r="50%">
-         <stop offset="0%" stop-color="hsl(${hues[i]} 70% 52%)" stop-opacity="0.16"/>
-         <stop offset="55%" stop-color="hsl(${hues[i]} 70% 40%)" stop-opacity="0.06"/>
-         <stop offset="100%" stop-color="hsl(${hues[i]} 70% 30%)" stop-opacity="0"/>
-       </radialGradient>`,
-    );
-    nebulae.push(`<circle cx="${cx}" cy="${cy}" r="${r}" fill="url(#neb${i})" data-nebula="1"/>`);
-  }
-
-  const defs = nebulae.filter((part) => part.startsWith("<radialGradient")).join("");
-  const shapes = nebulae.filter((part) => !part.startsWith("<radialGradient")).join("");
-
-  return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${BOARD_PIXELS}" height="${BOARD_PIXELS}">
-       <defs>${defs}</defs>
-       <rect width="100%" height="100%" fill="#01020a"/>
-       ${shapes}
-       ${stars.join("")}
-     </svg>`,
-  );
-}
-
-/** Deterministic, so the sky is stable across renders. */
-function seeded(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state * 1664525 + 1013904223) >>> 0;
-    return state / 0x1_0000_0000;
-  };
-}
-
-/** Kept for callers that want a stable per-handle hue. */
-export function hueFor(value: string): number {
-  const hash = createHash("sha1").update(value).digest();
-  return ((hash[0] ?? 0) / 255) * 360;
+function emptySky(): Sharp {
+  return sharp({
+    create: {
+      width: BOARD_PIXELS,
+      height: BOARD_PIXELS,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  });
 }

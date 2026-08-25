@@ -226,7 +226,12 @@ body {
   position: relative;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: #01020a;
+  /* Space before the canvas has painted anything, so the first frame is never
+     a flat grey box. */
+  background:
+    radial-gradient(120% 90% at 22% 18%, rgba(60, 76, 160, 0.16), transparent 60%),
+    radial-gradient(90% 80% at 78% 76%, rgba(120, 60, 150, 0.13), transparent 62%),
+    #01020a;
   overflow: hidden;
   min-height: 0;
 }

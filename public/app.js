@@ -198,9 +198,10 @@ function currentSquare() {
  * beyond the last orbit.
  */
 const STAR_LAYERS = [
-  { depth: 0.3, count: 320, minSize: 0.6, maxSize: 1.1, minAlpha: 0.16, maxAlpha: 0.45 },
-  { depth: 0.58, count: 190, minSize: 0.8, maxSize: 1.5, minAlpha: 0.28, maxAlpha: 0.7 },
-  { depth: 0.88, count: 90, minSize: 1.1, maxSize: 2.1, minAlpha: 0.45, maxAlpha: 1 },
+  { depth: 0.16, count: 520, minSize: 0.5, maxSize: 0.9, minAlpha: 0.1, maxAlpha: 0.32 },
+  { depth: 0.34, count: 380, minSize: 0.6, maxSize: 1.2, minAlpha: 0.16, maxAlpha: 0.48 },
+  { depth: 0.6, count: 240, minSize: 0.8, maxSize: 1.6, minAlpha: 0.28, maxAlpha: 0.72 },
+  { depth: 0.88, count: 110, minSize: 1.1, maxSize: 2.2, minAlpha: 0.45, maxAlpha: 1 },
 ];
 
 const starLayers = STAR_LAYERS.map((layer) => ({ ...layer, stars: [] }));
@@ -213,8 +214,10 @@ function buildStars() {
     return seed / 0x100000000;
   };
 
-  const pad = PX * 0.35;
   for (const layer of starLayers) {
+    // A distant layer barely moves with the board, so its stars must be spread
+    // over a much wider field to still cover the screen at the far edges.
+    const pad = PX * (1.2 / Math.max(0.15, layer.depth));
     layer.stars = [];
     for (let i = 0; i < layer.count; i += 1) {
       layer.stars.push({
@@ -231,13 +234,11 @@ function buildStars() {
 }
 
 /**
- * Drawn over the board rather than under it, and skipped wherever a planet is.
+ * The sky, drawn behind everything and across the whole viewport.
  *
- * Painting them behind would mean an alpha channel on the composite, which cost
- * three quarters of a megabyte. Instead each star is projected back to the tile
- * it falls on and dropped if that tile is occupied, so a star never appears in
- * front of a world. The lookup is one array read against the index hit testing
- * already uses.
+ * Not clipped to the board: space does not stop where the tiles do, and the
+ * composite is transparent now, so these show through wherever there is no
+ * planet and carry on past the last orbit.
  */
 function drawStars(rect, seconds) {
   for (const layer of starLayers) {
@@ -247,17 +248,118 @@ function drawStars(rect, seconds) {
       const sy = originY * layer.depth + star.y * scale;
       if (sy < -4 || sy > rect.height + 4) continue;
 
-      const bx = Math.floor((sx - originX) / scale / TILE);
-      const by = Math.floor((sy - originY) / scale / TILE);
-      if (bx >= 0 && by >= 0 && bx < BOARD && by < BOARD && owner[by * BOARD + bx] !== -1) {
-        continue;
-      }
-
       const twinkle = 0.62 + 0.38 * Math.sin(seconds * star.speed + star.phase);
       ctx.globalAlpha = Math.min(1, star.alpha * twinkle);
       ctx.fillStyle = star.warm ? "#ffe6c8" : "#dce9ff";
       ctx.fillRect(sx, sy, star.size, star.size);
     }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * Nebulae, drawn once into an offscreen canvas and then panned as the most
+ * distant layer there is.
+ *
+ * Rebuilding five large radial gradients every frame would be wasteful when
+ * they never change; stretching one soft image costs a single drawImage, and
+ * soft is all they are.
+ */
+let nebulaLayer = null;
+
+function buildNebulae() {
+  const size = 1024;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const nctx = canvas.getContext("2d");
+
+  let seed = 0x5eed1e55;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+
+  const hues = [232, 268, 198, 312, 210, 250];
+  for (const hue of hues) {
+    const cx = random() * size;
+    const cy = random() * size;
+    const r = size * (0.16 + random() * 0.24);
+    const gradient = nctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    gradient.addColorStop(0, `hsla(${hue}, 70%, 52%, 0.20)`);
+    gradient.addColorStop(0.55, `hsla(${hue}, 70%, 40%, 0.07)`);
+    gradient.addColorStop(1, `hsla(${hue}, 70%, 30%, 0)`);
+    nctx.fillStyle = gradient;
+    nctx.beginPath();
+    nctx.arc(cx, cy, r, 0, Math.PI * 2);
+    nctx.fill();
+  }
+  nebulaLayer = canvas;
+}
+
+const NEBULA_DEPTH = 0.12;
+const NEBULA_SPAN = 3.4;
+
+function drawNebulae() {
+  if (nebulaLayer === null) return;
+  const span = PX * NEBULA_SPAN * scale;
+  const offset = -PX * ((NEBULA_SPAN - 1) / 2) * scale;
+  ctx.drawImage(
+    nebulaLayer,
+    originX * NEBULA_DEPTH + offset,
+    originY * NEBULA_DEPTH + offset,
+    span,
+    span,
+  );
+}
+
+/**
+ * The atmosphere every planet sits in, as one sprite drawn many times.
+ *
+ * Baking these into the board image cost more than everything else on it put
+ * together, because a soft gradient over transparency is the worst case for
+ * WebP's alpha channel. One cached sprite scaled per planet costs a drawImage,
+ * and being drawn live means it can breathe.
+ */
+const HALO_SPAN = 1.9;
+let haloSprite = null;
+
+function buildHalo() {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const hctx = canvas.getContext("2d");
+
+  const c = size / 2;
+  const gradient = hctx.createRadialGradient(c, c, c / HALO_SPAN, c, c, c);
+  gradient.addColorStop(0, "rgba(111, 168, 255, 0.34)");
+  gradient.addColorStop(0.45, "rgba(111, 168, 255, 0.13)");
+  gradient.addColorStop(1, "rgba(111, 168, 255, 0)");
+  hctx.fillStyle = gradient;
+  hctx.beginPath();
+  hctx.arc(c, c, c, 0, Math.PI * 2);
+  hctx.fill();
+
+  haloSprite = canvas;
+}
+
+/** Drawn under the planet sheet, so every world sits in its own glow. */
+function drawHalos(rect, seconds) {
+  if (haloSprite === null) return;
+
+  for (let i = 0; i < blocks.length; i += 1) {
+    const block = blocks[i];
+    const r = rectFor(block);
+    const span = r.side * HALO_SPAN;
+    const x = r.x - (span - r.side) / 2;
+    const y = r.y - (span - r.side) / 2;
+    if (x > rect.width || y > rect.height || x + span < 0 || y + span < 0) continue;
+
+    // Each one on its own phase, so the field shimmers rather than pulsing
+    // in unison like a warning light.
+    ctx.globalAlpha = 0.72 + 0.28 * Math.sin(seconds * 0.6 + i * 1.7);
+    ctx.drawImage(haloSprite, x, y, span, span);
   }
   ctx.globalAlpha = 1;
 }
@@ -341,9 +443,16 @@ function draw() {
   const rect = viewport.getBoundingClientRect();
   const seconds = performance.now() / 1000;
 
-  // The void, the sky the server drew, then the stars that move.
+  // The void fills the window, then the sky, then the worlds on top of it.
+  // Nothing here is clipped to the board: the universe is the background of the
+  // whole app, and the board is only where planets are allowed to exist.
   ctx.fillStyle = "#01020a";
   ctx.fillRect(0, 0, rect.width, rect.height);
+  drawNebulae();
+  drawStars(rect, seconds);
+
+  if (selection !== null) drawPlacementGrid(rect);
+  drawHalos(rect, seconds);
 
   if (composite !== null) {
     ctx.imageSmoothingEnabled = true;
@@ -356,9 +465,6 @@ function draw() {
       Math.round(PX * scale),
     );
   }
-
-  drawStars(rect, seconds);
-  if (selection !== null) drawPlacementGrid(rect);
 
   drawClaimedOrbits(seconds);
 
@@ -729,6 +835,8 @@ window.addEventListener("resize", () => {
 // Stats first: it carries the tile size every coordinate calculation depends on.
 await loadStats();
 buildStars();
+buildNebulae();
+buildHalo();
 
 const featured = createFeaturedColumn({
   listEl: document.getElementById("featured-list"),
