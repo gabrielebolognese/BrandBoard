@@ -185,6 +185,49 @@ function isFree(square) {
   return inUniverse(square) && !checkout.claims(square);
 }
 
+/**
+ * The client's mirror of the server's pricing, so a drag can be costed as it
+ * happens. The server prices the order again at checkout and that is the number
+ * that gets charged; this only has to agree with it.
+ */
+function orbitAt(x, y) {
+  const dx = x + 0.5 - boardCenter;
+  const dy = y + 0.5 - boardCenter;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  for (const orbit of orbits) {
+    if (distance < orbit.outerRadius) return orbit;
+  }
+  return null;
+}
+
+/** Summed per tile, because a planet can straddle two orbits. */
+function priceOf(square) {
+  let cents = 0;
+  for (let dx = 0; dx < square.size; dx += 1) {
+    for (let dy = 0; dy < square.size; dy += 1) {
+      cents += orbitAt(square.x + dx, square.y + dy)?.centsPerTilePerMonth ?? 0;
+    }
+  }
+  return cents;
+}
+
+/** A planet is inside the universe only when its furthest corner is. */
+function inUniverse(square) {
+  const corners = [
+    [square.x, square.y],
+    [square.x + square.size, square.y],
+    [square.x, square.y + square.size],
+    [square.x + square.size, square.y + square.size],
+  ];
+  let furthest = 0;
+  for (const [cx, cy] of corners) {
+    const dx = cx - boardCenter;
+    const dy = cy - boardCenter;
+    furthest = Math.max(furthest, Math.sqrt(dx * dx + dy * dy));
+  }
+  return furthest <= universeRadius;
+}
+
 /** The square currently under the cursor: dragged size, or 1x1 when hovering. */
 function currentSquare() {
   if (selection !== null) return selection.square;
