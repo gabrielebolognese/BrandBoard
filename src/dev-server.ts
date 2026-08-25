@@ -10,7 +10,13 @@ import { ClaimError, TileConflictError } from "./board/errors.js";
 import { isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
-import { InvalidFeaturedDaysError, activeFeatured, featureBlock } from "./board/featured.js";
+import {
+  BlockNotLiveError,
+  InvalidFeaturedDaysError,
+  UnknownBlockError,
+  activeFeatured,
+  featureBlock,
+} from "./board/featured.js";
 import { availabilityBitmap, buildManifest, heldTileCount } from "./board/manifest.js";
 import { currentlyWatching, startWatchingTicker } from "./board/watching.js";
 import {
@@ -86,10 +92,36 @@ console.log(`${(initial.webp.length / 1024).toFixed(0)}KB webp, ${initial.blocks
 
 startWatchingTicker();
 
+/**
+ * Distinguishes "this request failed" from "the database is gone".
+ *
+ * The second one used to leave a process holding the port and answering every
+ * request with a 500, which is worse than not being there: the pool-level
+ * handler only fires for idle clients, never for a failure hit mid-request.
+ */
+function isConnectionFailure(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const code = (error as { code?: unknown }).code;
+  const message = (error as { message?: unknown }).message;
+  return (
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ENOTFOUND" ||
+    code === "57P01" || // admin shutdown
+    code === "57P02" || // crash shutdown
+    code === "57P03" || // cannot connect now
+    (typeof message === "string" && /Connection terminated|server closed the connection/i.test(message))
+  );
+}
+
 const server = createServer((req, res) => {
   void handle(req, res).catch((error: unknown) => {
     console.error(error);
     if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+    if (isConnectionFailure(error)) {
+      console.error("lost the database mid-request, shutting down.");
+      process.exit(1);
+    }
   });
 });
 
@@ -335,7 +367,7 @@ async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void
     const body = (await readJson(req)) as { placements?: unknown };
     placements = parsePlacements(body.placements);
   } catch (error) {
-    return sendJson(res, 400, { error: "bad_request", detail: String(error) });
+    return badRequest(res, error);
   }
 
   const rate = tileRate();
@@ -412,7 +444,7 @@ async function buyFeatured(req: IncomingMessage, res: ServerResponse): Promise<v
     blockId = body.blockId;
     days = body.days;
   } catch (error) {
-    return sendJson(res, 400, { error: "bad_request", detail: String(error) });
+    return badRequest(res, error);
   }
 
   try {
@@ -424,7 +456,11 @@ async function buyFeatured(req: IncomingMessage, res: ServerResponse): Promise<v
       charged: false,
     });
   } catch (error) {
-    if (error instanceof InvalidFeaturedDaysError) {
+    if (
+      error instanceof InvalidFeaturedDaysError ||
+      error instanceof UnknownBlockError ||
+      error instanceof BlockNotLiveError
+    ) {
       return sendJson(res, error.status, { error: error.code, message: error.message });
     }
     throw error;
@@ -437,7 +473,7 @@ async function claim(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = (await readJson(req)) as { placements?: unknown };
     placements = parsePlacements(body.placements);
   } catch (error) {
-    return sendJson(res, 400, { error: "bad_request", detail: String(error) });
+    return badRequest(res, error);
   }
 
   try {
@@ -459,17 +495,32 @@ async function claim(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 }
 
+/** A cart bigger than this is not a cart. Bounds the work one request can ask for. */
+const MAX_PLACEMENTS = 64;
+
 function parsePlacements(input: unknown): Placement[] {
   if (!Array.isArray(input) || input.length === 0) {
     throw new Error("expected a non-empty placements array");
   }
-  return input.map((raw) => {
+  if (input.length > MAX_PLACEMENTS) {
+    throw new Error(`a single order may contain at most ${MAX_PLACEMENTS} blocks`);
+  }
+
+  const placements = input.map((raw) => {
     const { x, y, size } = raw as Record<string, unknown>;
-    if (typeof x !== "number" || typeof y !== "number" || typeof size !== "number") {
-      throw new Error("each placement needs numeric x, y and size");
+    // Integers only: a fractional or infinite coordinate has no meaning on a
+    // tile grid and would reach the query as something SQL has to reject.
+    if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(size)) {
+      throw new Error("each placement needs whole-number x, y and size");
     }
-    return { x, y, size };
+    return { x: x as number, y: y as number, size: size as number };
   });
+
+  const tiles = placements.reduce((sum, p) => sum + p.size * p.size, 0);
+  if (tiles > TILE_COUNT) {
+    throw new Error("that order covers more tiles than the board has");
+  }
+  return placements;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +543,7 @@ async function sendFile(res: ServerResponse, file: URL): Promise<void> {
       "content-type": MIME[extname(file.pathname)] ?? "application/octet-stream",
       "content-length": body.length,
       "cache-control": "no-cache",
+      "x-content-type-options": "nosniff",
     });
     res.end(body);
   } catch {
@@ -509,17 +561,58 @@ function sendJson(
   res.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(payload),
+    // Never let a browser guess a type for something we said was JSON.
+    "x-content-type-options": "nosniff",
     ...headers,
   });
   res.end(payload);
 }
 
+/** Nothing this API accepts is large; anything bigger is a mistake or an attack. */
+const MAX_BODY_BYTES = 64 * 1024;
+
+/** Carries the status a bad request should get, so callers do not guess. */
+class BadRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status = 400,
+  ) {
+    super(message);
+    this.name = "BadRequestError";
+  }
+}
+
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > MAX_BODY_BYTES) {
+      // Stop accumulating, but leave the socket alone so the caller still gets
+      // an answer. Destroying it here would surface as a connection error and
+      // tell them nothing about what went wrong.
+      throw new BadRequestError(`request body exceeds ${MAX_BODY_BYTES} bytes`, 413);
+    }
+    chunks.push(buffer);
+  }
+
   const raw = Buffer.concat(chunks).toString("utf8");
   if (raw.trim() === "") return {};
-  return JSON.parse(raw) as Record<string, unknown>;
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new BadRequestError("body is not valid JSON");
+  }
+}
+
+function badRequest(res: ServerResponse, error: unknown): void {
+  const status = error instanceof BadRequestError ? error.status : 400;
+  sendJson(res, status, {
+    error: status === 413 ? "payload_too_large" : "bad_request",
+    message: error instanceof Error ? error.message : String(error),
+  });
 }
 
 function countBits(buffer: Buffer): number {

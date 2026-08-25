@@ -12,6 +12,8 @@ import type { Queryable } from "../db/client.js";
  * is `starts_at` to `expires_at` on the row, and nothing else decides it.
  */
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface FeaturedBlock {
   readonly slotId: string;
   readonly id: string;
@@ -23,6 +25,26 @@ export interface FeaturedBlock {
   readonly url: string;
   readonly expiresAt: Date;
   readonly secondsRemaining: number;
+}
+
+export class UnknownBlockError extends Error {
+  readonly code = "unknown_block";
+  readonly status = 404;
+
+  constructor(readonly blockId: string) {
+    super("No such block.");
+    this.name = "UnknownBlockError";
+  }
+}
+
+export class BlockNotLiveError extends Error {
+  readonly code = "block_not_live";
+  readonly status = 409;
+
+  constructor(readonly status_: string) {
+    super(`Only a live block can be featured; this one is ${status_}.`);
+    this.name = "BlockNotLiveError";
+  }
 }
 
 export class InvalidFeaturedDaysError extends Error {
@@ -49,6 +71,16 @@ export async function featureBlock(
 ): Promise<{ slotId: string; expiresAt: Date; priceCents: number }> {
   if (!isValidFeaturedDays(days)) throw new InvalidFeaturedDaysError(days);
   const priceCents = featuredPriceCents(days);
+
+  // Featuring something that is not on the board would take money for a slot
+  // activeFeatured() filters out, so it would be paid for and never shown.
+  if (!UUID.test(blockId)) throw new UnknownBlockError(blockId);
+  const target = await db.query<{ status: string }>(`SELECT status FROM blocks WHERE id = $1`, [
+    blockId,
+  ]);
+  const status = target.rows[0]?.status;
+  if (status === undefined) throw new UnknownBlockError(blockId);
+  if (status !== "live") throw new BlockNotLiveError(status);
 
   const result = await db.query<{ id: string; expires_at: Date }>(
     `INSERT INTO featured_slots (block_id, days, price_cents, checkout_session_id,

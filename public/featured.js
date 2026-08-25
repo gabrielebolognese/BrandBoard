@@ -6,6 +6,7 @@
 // after that. Nothing resets at midnight, so the countdowns are staggered and
 // each is read straight from its own expiry.
 
+import { getJson, messageFrom, postJson } from "./http.js";
 import { createModal } from "./modal.js";
 
 export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPurchase }) {
@@ -29,8 +30,9 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
   // ---------------------------------------------------------------------------
 
   async function refresh() {
-    const data = await (await fetch("/api/featured")).json();
-    slots = data.blocks;
+    const { ok, body } = await getJson("/api/featured");
+    if (!ok || body === null) return;
+    slots = body.blocks;
     render();
   }
 
@@ -242,25 +244,14 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
     trigger.disabled = true;
     trigger.textContent = "Featuring...";
 
-    let response;
-    let body;
-    try {
-      response = await fetch("/api/featured", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ blockId: chosen, days }),
-      });
-      body = await response.json();
-    } catch {
-      trigger.disabled = false;
-      trigger.textContent = "Feature";
-      return;
-    }
+    const response = await postJson("/api/featured", { blockId: chosen, days });
+    const body = response.body;
 
-    if (response.status !== 201) {
-      modal.footer.prepend(resultBox("Could not feature", body.message ?? "Rejected."));
-      trigger.disabled = false;
+    if (response.status !== 201 || body === null) {
       renderFooter();
+      modal.footer.prepend(
+        resultBox("Could not feature", messageFrom(response, "That purchase was rejected.")),
+      );
       return;
     }
 
@@ -286,7 +277,11 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
   function resultBox(title, detail) {
     const el = document.createElement("div");
     el.className = "result";
-    el.innerHTML = `<strong>${title}</strong><span>${detail}</span>`;
+    const head = document.createElement("strong");
+    head.textContent = title;
+    const body = document.createElement("span");
+    body.textContent = detail;
+    el.append(head, body);
     return el;
   }
 
@@ -294,12 +289,9 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
 
   async function loadPricing() {
     for (let n = 1; n <= 10; n += 1) {
-      try {
-        const quote = await (await fetch(`/api/featured/quote?days=${n}`)).json();
-        pricing.set(n, quote.priceCents);
-      } catch {
-        // The preview formula stands in until the server answers.
-      }
+      const { ok, body } = await getJson(`/api/featured/quote?days=${n}`);
+      // The preview formula stands in until the server answers.
+      if (ok && body !== null) pricing.set(n, body.priceCents);
     }
   }
 }

@@ -13,6 +13,7 @@
 // The prices rendered after reserving are the server's. The figures shown
 // before that are a preview, and are labelled as one.
 
+import { messageFrom, postJson } from "./http.js";
 import { createModal } from "./modal.js";
 
 export function createCheckout({ rate, onChange, onReserved, onConflict }) {
@@ -296,23 +297,10 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     trigger.disabled = true;
     trigger.textContent = "Reserving...";
 
-    let response;
-    try {
-      response = await fetch("/api/checkout", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ placements: items }),
-      });
-    } catch {
-      trigger.disabled = false;
-      trigger.textContent = "Reserve tiles and continue";
-      modal.footer.prepend(result("Could not reach the server", "Check the connection and retry."));
-      return;
-    }
+    const response = await postJson("/api/checkout", { placements: items });
+    const body = response.body;
 
-    const body = await response.json();
-
-    if (response.status === 201) {
+    if (response.status === 201 && body !== null) {
       session = body;
       items = [];
       payState = { status: "idle" };
@@ -328,13 +316,13 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     // reserved, so the cart is left exactly as it was.
     trigger.disabled = false;
     trigger.textContent = "Reserve tiles and continue";
-    if (response.status === 409) {
+    if (response.status === 409 && body !== null) {
       onConflict?.(body);
       modal.close();
       return;
     }
     modal.footer.prepend(
-      result("Could not reserve", body.message ?? "That order was rejected."),
+      result("Could not reserve", messageFrom(response, "That order was rejected.")),
     );
   }
 
@@ -343,18 +331,17 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     trigger.disabled = true;
     trigger.textContent = "Contacting payment provider...";
 
-    let response;
-    let body;
-    try {
-      response = await fetch(`/api/checkout/${session.id}/pay`, { method: "POST" });
-      body = await response.json();
-    } catch {
-      payState = { status: "error", message: "Could not reach the server." };
+    const response = await postJson(`/api/checkout/${session.id}/pay`);
+    const body = response.body;
+
+    if (response.status === 0 || response.error !== null) {
+      payState = { status: "error", message: messageFrom(response, "Could not reach the server.") };
       render();
       return;
     }
 
-    if (response.status === 200 && body.redirectUrl !== undefined) {
+    // What a wired-up provider will return: somewhere to send the buyer.
+    if (response.status === 200 && body?.redirectUrl !== undefined) {
       window.location.href = body.redirectUrl;
       return;
     }
@@ -364,7 +351,7 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
     payState =
       response.status === 503
         ? { status: "unavailable" }
-        : { status: "error", message: body.message ?? "Payment could not be started." };
+        : { status: "error", message: messageFrom(response, "Payment could not be started.") };
 
     if (response.status === 410) {
       // The hold lapsed. The order is gone, so drop it rather than showing a
@@ -375,7 +362,9 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
       renderLauncher();
       await onReserved?.();
       modal.close();
-      onConflict?.({ message: body.message ?? "The hold expired and the tiles were released." });
+      onConflict?.({
+        message: messageFrom(response, "The hold expired and the tiles were released."),
+      });
       return;
     }
     render();
@@ -410,7 +399,11 @@ export function createCheckout({ rate, onChange, onReserved, onConflict }) {
   function result(title, detail) {
     const el = document.createElement("div");
     el.className = "result";
-    el.innerHTML = `<strong>${title}</strong><span>${detail}</span>`;
+    const head = document.createElement("strong");
+    head.textContent = title;
+    const body = document.createElement("span");
+    body.textContent = detail;
+    el.append(head, body);
     return el;
   }
 

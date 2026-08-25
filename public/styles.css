@@ -11,6 +11,15 @@
 
 * { box-sizing: border-box; }
 
+/*
+ * [hidden] comes from the user agent stylesheet, so it loses to any class that
+ * sets display. That is not a hypothetical: .modal-backdrop, .card and
+ * .cart-launcher all set display, and all three stayed on screen no matter what
+ * the JavaScript did. This makes hidden mean hidden, whatever else is declared.
+ */
+[hidden] { display: none !important; }
+
+
 html, body {
   margin: 0;
   height: 100%;
@@ -181,7 +190,7 @@ body {
   cursor: default;
 }
 
-.feat-vacant { font-size: 11px; color: #5661740; color: #566174; }
+.feat-vacant { font-size: 11px; color: #566174; }
 
 .feat-clock {
   position: absolute;

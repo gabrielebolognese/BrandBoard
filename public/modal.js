@@ -6,10 +6,24 @@
 // scrolling. Anything in the app that needs a dialog should use this rather
 // than growing its own.
 
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+];
+
+const FOCUSABLE_SELECTOR = FOCUSABLE.join(", ");
+
+/** Scopes every branch of the selector list, which a bare prefix would not. */
+function within(scope) {
+  return FOCUSABLE.map((part) => `${scope} ${part}`).join(", ");
+}
 
 let openCount = 0;
+let dialogSeq = 0;
 
 export function createModal({ title = "", width = 460, onClose } = {}) {
   const backdrop = document.createElement("div");
@@ -22,7 +36,8 @@ export function createModal({ title = "", width = 460, onClose } = {}) {
   dialog.setAttribute("role", "dialog");
   dialog.setAttribute("aria-modal", "true");
 
-  const titleId = `modal-title-${Math.floor(performance.now() * 1000)}`;
+  dialogSeq += 1;
+  const titleId = `modal-title-${dialogSeq}`;
   const header = document.createElement("header");
   header.className = "modal-head";
 
@@ -64,7 +79,7 @@ export function createModal({ title = "", width = 460, onClose } = {}) {
     document.body.classList.add("modal-open");
     // Focus the first useful control rather than the close button when there
     // is one, so a keyboard user lands on the action.
-    const target = dialog.querySelector(".modal-foot " + FOCUSABLE) ?? close;
+    const target = dialog.querySelector(within(".modal-foot")) ?? close;
     target.focus();
   }
 
@@ -93,7 +108,7 @@ export function createModal({ title = "", width = 460, onClose } = {}) {
     }
     if (event.key !== "Tab") return;
 
-    const focusable = [...dialog.querySelectorAll(FOCUSABLE)].filter(
+    const focusable = [...dialog.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
       (el) => el.offsetParent !== null,
     );
     if (focusable.length === 0) return;

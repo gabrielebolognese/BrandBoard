@@ -9,7 +9,13 @@ import {
 } from "../config.js";
 import { createTestUser, hasDatabase, resetBoard, setupTestDatabase } from "../test/db.js";
 import { claimBlock } from "./claim.js";
-import { InvalidFeaturedDaysError, activeFeatured, featureBlock } from "./featured.js";
+import {
+  BlockNotLiveError,
+  InvalidFeaturedDaysError,
+  UnknownBlockError,
+  activeFeatured,
+  featureBlock,
+} from "./featured.js";
 
 describe("featured pricing", () => {
   it("charges 10 for the first day and 8 for each one after", () => {
@@ -151,6 +157,22 @@ suite("featured windows [requires DATABASE_URL]", () => {
     const block = await liveBlock(0, 0, "bad");
     await expect(featureBlock(pool, block, 11)).rejects.toBeInstanceOf(InvalidFeaturedDaysError);
     await expect(featureBlock(pool, block, 0)).rejects.toBeInstanceOf(InvalidFeaturedDaysError);
+    expect(await activeFeatured(pool)).toHaveLength(0);
+  });
+
+  it("refuses to feature a block that does not exist", async () => {
+    await expect(
+      featureBlock(pool, "11111111-2222-3333-4444-555555555555", 1),
+    ).rejects.toBeInstanceOf(UnknownBlockError);
+    // Not a uuid at all: still a clean refusal, not a database type error.
+    await expect(featureBlock(pool, "not-a-uuid", 1)).rejects.toBeInstanceOf(UnknownBlockError);
+  });
+
+  it("refuses to feature a block that is not on the board yet", async () => {
+    // Reserved, not live: featuring it would charge for a slot the column
+    // filters out, so it would be paid for and never shown.
+    const reserved = await claimBlock(pool, owner, { x: 60, y: 60, size: 1 });
+    await expect(featureBlock(pool, reserved.id, 1)).rejects.toBeInstanceOf(BlockNotLiveError);
     expect(await activeFeatured(pool)).toHaveLength(0);
   });
 

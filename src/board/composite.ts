@@ -43,6 +43,13 @@ export function blockRect(x: number, y: number, size: number) {
 let cached: CompositeBoard | null = null;
 
 /**
+ * A render in progress, shared by everyone waiting for it. Without this, a cold
+ * cache plus a burst of visitors means several concurrent 2400x2400 composites,
+ * which is the most expensive thing this server does.
+ */
+let inFlight: { version: string; work: Promise<CompositeBoard> } | null = null;
+
+/**
  * The composite board image: every live avatar flattened into one 2400x2400
  * WebP. This is what a visitor's browser paints, so the board appears in a
  * single request instead of ten thousand.
@@ -56,7 +63,23 @@ export async function getCompositeBoard(
 ): Promise<CompositeBoard> {
   const version = await boardVersion(pool);
   if (cached !== null && cached.version === version) return cached;
+  if (inFlight !== null && inFlight.version === version) return inFlight.work;
 
+  const work = renderBoard(pool, avatars, version);
+  inFlight = { version, work };
+  try {
+    cached = await work;
+    return cached;
+  } finally {
+    if (inFlight?.version === version) inFlight = null;
+  }
+}
+
+async function renderBoard(
+  pool: Pool,
+  avatars: AvatarStore,
+  version: string,
+): Promise<CompositeBoard> {
   const live = await pool.query<{ id: string; x: number; y: number; size: number; image_url: string }>(
     `SELECT id, x, y, size, image_url
        FROM blocks
@@ -96,13 +119,13 @@ export async function getCompositeBoard(
     .webp({ quality: 90, alphaQuality: 100 })
     .toBuffer();
 
-  cached = { version, webp, blocks: live.rows.length };
-  return cached;
+  return { version, webp, blocks: live.rows.length };
 }
 
 /** Forget the cached image; used after seeding. */
 export function invalidateCompositeBoard(): void {
   cached = null;
+  inFlight = null;
 }
 
 /**

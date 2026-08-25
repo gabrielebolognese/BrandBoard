@@ -5,6 +5,7 @@
 // arithmetic against (x, y, size): there are no per-block event listeners.
 
 import { createCheckout } from "./checkout.js";
+import { getJson, postJson } from "./http.js";
 import { createFeaturedColumn } from "./featured.js";
 
 const BOARD = 100;
@@ -61,7 +62,8 @@ let toastTimer = 0;
 // ---------------------------------------------------------------------------
 
 async function loadStats() {
-  const stats = await (await fetch("/api/stats")).json();
+  const { ok, body: stats } = await getJson("/api/stats");
+  if (!ok || stats === null) return;
   TILE = stats.tilePixels;
   INSET = stats.tileInset;
   PX = BOARD * TILE;
@@ -74,7 +76,8 @@ async function loadStats() {
 }
 
 async function loadManifest() {
-  const manifest = await (await fetch("/api/manifest")).json();
+  const { ok, body: manifest } = await getJson("/api/manifest");
+  if (!ok || manifest === null) return;
   blocks = manifest.blocks;
   owner.fill(-1);
   blocks.forEach((block, i) => {
@@ -88,8 +91,9 @@ async function loadManifest() {
 }
 
 async function loadAvailability() {
-  const { bits } = await (await fetch("/api/availability")).json();
-  const raw = atob(bits);
+  const { ok, body } = await getJson("/api/availability");
+  if (!ok || body === null) return;
+  const raw = atob(body.bits);
   const next = new Uint8Array(BOARD * BOARD);
   for (let i = 0; i < next.length; i += 1) {
     next[i] = (raw.charCodeAt(i >> 3) >> (i & 7)) & 1;
@@ -333,15 +337,13 @@ function showCard(block, clientX, clientY) {
       links.append(pill);
     }
   } else {
-    fetch(`/api/block/${block.id}`)
-      .then((r) => r.json())
-      .then((detail) => {
-        detailCache.set(block.id, detail);
-        if (hoverBlock >= 0 && blocks[hoverBlock]?.id === block.id) {
-          showCard(block, clientX, clientY);
-        }
-      })
-      .catch(() => {});
+    void getJson(`/api/block/${block.id}`).then(({ ok, body: detail }) => {
+      if (!ok || detail === null) return;
+      detailCache.set(block.id, detail);
+      if (hoverBlock >= 0 && blocks[hoverBlock]?.id === block.id) {
+        showCard(block, clientX, clientY);
+      }
+    });
   }
 
   card.hidden = false;
@@ -440,7 +442,7 @@ canvas.addEventListener("pointermove", (event) => {
 });
 
 canvas.addEventListener("pointerup", (event) => {
-  canvas.releasePointerCapture(event.pointerId);
+  if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
 
   if (panning !== null) {
     const moved = panning.moved;
@@ -522,12 +524,16 @@ canvas.addEventListener(
 // Controls
 // ---------------------------------------------------------------------------
 
-document.querySelector(".dev").addEventListener("click", async (event) => {
+document.querySelector(".dev")?.addEventListener("click", async (event) => {
   const action = event.target.dataset?.action;
   if (action === undefined) return;
 
   if (action === "sweep") {
-    const result = await (await fetch("/api/sweep", { method: "POST" })).json();
+    const { ok, body: result } = await postJson("/api/sweep");
+    if (!ok || result === null) {
+      toast("The sweep could not be run.", "bad");
+      return;
+    }
     toast(
       `Swept ${result.expiredBlockIds.length} lapsed reservation(s), freed ${result.releasedTiles} tile(s).`,
       "ok",
@@ -537,7 +543,7 @@ document.querySelector(".dev").addEventListener("click", async (event) => {
   }
 
   if (action === "reset") {
-    await fetch("/api/reset", { method: "POST" });
+    await postJson("/api/reset");
     checkout.clear();
     toast("Board emptied. Restart the server to reseed.", "ok");
     await Promise.all([loadManifest(), loadAvailability(), loadStats(), loadComposite()]);
@@ -599,5 +605,7 @@ void Promise.all([
 // The watching count is server state that drifts once a minute, so poll for it
 // rather than inventing a number per browser.
 setInterval(() => {
-  void loadStats();
+  loadStats().catch(() => {
+    // A blip in the stats poll is not worth surfacing; the next tick retries.
+  });
 }, 20_000);
