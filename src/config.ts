@@ -205,8 +205,53 @@ export const TILE_INSET = 1;
 /** Diameter of the planet drawn for a single tile: 12 - 1 - 1 = 10px. */
 export const TILE_SQUARE = TILE_PIXELS - 2 * TILE_INSET;
 
-/** Planets are rented, not bought outright: every rate is per tile per month. */
-export const BILLING_PERIOD = "month" as const;
+/**
+ * Rates are quoted per tile per month, and charged a year at a time.
+ *
+ * Monthly billing does not survive contact with the outer reach. A one tile
+ * planet there is a dollar a month, and card processing on a dollar costs
+ * between a third and a half of it, every month, forever. A year in one
+ * transaction turns that into a few percent, and it suits a product where you
+ * are buying a place in a universe rather than renting a desk.
+ */
+export const BILLING_INTERVAL = "year" as const;
+export const MONTHS_PER_TERM = 12;
+
+/**
+ * The smallest monthly rate an order can be charged at.
+ *
+ * The same arithmetic from the other end: even annually, a dollar a month is
+ * twelve dollars a year, and the fee on that is still meaningful. Orders below
+ * the floor are charged the floor, which is stated before anyone commits, so
+ * the smallest planets stay buyable rather than being refused at checkout.
+ */
+export const MONTHLY_FLOOR_CENTS = 500;
+
+export interface OrderTotals {
+  /** What the tiles come to, before the floor. */
+  readonly monthlySubtotalCents: number;
+  /** What is actually charged per month of the term. */
+  readonly monthlyTotalCents: number;
+  /** The one figure that leaves the account. */
+  readonly termTotalCents: number;
+  readonly floorApplied: boolean;
+  readonly months: number;
+  readonly interval: typeof BILLING_INTERVAL;
+}
+
+export function orderTotals(monthlyCentsPerLine: readonly number[]): OrderTotals {
+  const monthlySubtotalCents = monthlyCentsPerLine.reduce((sum, cents) => sum + cents, 0);
+  const monthlyTotalCents = Math.max(monthlySubtotalCents, MONTHLY_FLOOR_CENTS);
+
+  return {
+    monthlySubtotalCents,
+    monthlyTotalCents,
+    termTotalCents: monthlyTotalCents * MONTHS_PER_TERM,
+    floorApplied: monthlyTotalCents > monthlySubtotalCents,
+    months: MONTHS_PER_TERM,
+    interval: BILLING_INTERVAL,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Featured slots

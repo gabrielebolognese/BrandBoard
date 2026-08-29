@@ -24,8 +24,8 @@ will schedule the wrong things.
 | Claiming | One atomic transaction. Cart is all-or-nothing. Conflicts return 409 with the offending tiles |
 | Reservations | 15 minute hold, released lazily on every claim and by a sweep every minute |
 | Orbits | 300×300 disc, radius 150. Core `<20` $5, inner belt `<60` $3, outer reach `<150` $1, per tile per month |
-| Pricing | Summed per tile from the orbits. Never accepted from the client |
-| Checkout | Cart → reserve → server-priced order. `/pay` answers 503 because no provider is wired |
+| Pricing | Summed per tile from the orbits, capped in size per orbit. Never accepted from the client |
+| Checkout | Cart → reserve → listing → server-priced order, billed yearly with a $5/month floor. `/pay` answers 503 until Polar is wired |
 | Payment plumbing | Webhook idempotency, signature verification over raw bytes, fulfilment with refunds for tiles lost mid-payment, subscription lapse both by webhook and by sweep, `refunds_owed` queue |
 | Review | `approveBlock` / `rejectBlock` exist as functions, with refund on rejection |
 | Featured | Per-purchase windows, 1–10 days, $10 first day then $8. Each runs its own clock |
@@ -63,6 +63,8 @@ Everything under `src/board/` and `src/payments/` is framework-agnostic and
 moves across unchanged. Only `src/dev-server.ts` and `public/` get rewritten.
 
 ### D2 — Hosting and infrastructure  ▸ *recommend Vercel + Neon + Cloudflare R2*
+
+Payments are settled: Polar, yearly, $5 a month floor.
 
 - **Vercel** for the app, since it follows from D1.
 - **Neon** for Postgres: branching makes the test database story trivial, and
@@ -179,24 +181,30 @@ The second half. Reached after payment, at `/claim/[blockId]`.
 A 40MB PNG, a 30000×30000 image, and a file claiming to be a PNG but is not are
 all rejected with a readable message.
 
-### P4 — Payments  *(2–3 days)* — blocked by nothing; plumbing is done
+### P4 — Payments  *(2–3 days)* — decided: Polar, billed yearly
 
-See the wiring notes already worked out. The seam is `payCheckout`.
+**Decided.** Polar as merchant of record, so VAT and sales tax worldwide are
+theirs rather than yours. Billed a year at a time with a $5 a month floor,
+because card processing on a one dollar monthly subscription costs a third of
+it: a year in one transaction turns that into a few percent, and the floor
+stops the smallest planets being sold at a loss. Both are built.
 
-- [ ] Confirm with Paddle that this product category is approved, and add the
-      domain to approved domains
-- [ ] Catalog: one recurring price per tile per month per orbit, quantity =
-      tiles in that orbit; two one-time prices for featured, day one and extra days
-- [ ] `POST /transactions` with `custom_data: { checkoutId }`, open Paddle.js
-- [ ] Point a notification destination at `/api/webhooks/paddle`, set
-      `PADDLE_WEBHOOK_SECRET`
+Already done: Standard Webhooks signature verification, delivery idempotency
+keyed on `webhook-id`, order fulfilment, refunds, the lapse sweep, and the
+annual totals with the floor. The seam left is `payCheckout`.
+
+- [ ] Confirm with Polar that this product category is accepted
+- [ ] Catalog: three recurring yearly prices, one per orbit, quantity = tiles in
+      that orbit; two one-time prices for featured, day one and extra days
+- [ ] Create a Polar checkout with `metadata: { checkoutId }` and return its URL
+- [ ] Point a webhook at `/api/webhooks/polar`, set `POLAR_WEBHOOK_SECRET`
 - [ ] Verify the event names against the dashboard. Anything unrecognised is
       recorded and ignored, so a rename fails quietly — watch `unprocessedEvents()`
-- [ ] Drain `outstandingRefunds()` into Paddle adjustments on a schedule
+- [ ] Drain `outstandingRefunds()` into Polar refunds on a schedule
 - [ ] Flip `ready: true`
 
 **Acceptance:** a sandbox payment moves a planet to `pending_review`, a replayed
-webhook changes nothing, and a payment landing after the hold lapsed produces a
+delivery changes nothing, and a payment landing after the hold lapsed produces a
 refund rather than a delivery.
 
 ### P5 — Review queue  *(2 days)* — blocked by P2
@@ -302,9 +310,11 @@ P3 and P5.
 
 ## 5. Risks
 
-**Paddle may not approve the category.** Ask before building P4. If refused,
-Stripe works but makes you merchant of record and liable for sales tax
-worldwide, which is a materially different business.
+**Polar may not accept the category.** Ask before finishing P4. If refused,
+Lemon Squeezy is the nearest equivalent; Stripe works but makes you merchant of
+record and liable for sales tax worldwide, which is a materially different
+business. The plumbing is provider-agnostic apart from `payCheckout` and the
+signature scheme, so switching is a day rather than a migration.
 
 **The universe is very large.** ~70,000 sellable tiles, ~59,000 of them at $1.
 Scarcity is what makes boards like this work. If the outer reach looks empty

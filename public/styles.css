@@ -536,6 +536,8 @@ body.modal-open { overflow: hidden; }
 
 .totals-row span:last-child { color: #c6cfdd; }
 
+.totals-note span { color: #e5c07b; }
+
 .totals-grand {
   margin-top: 9px;
   padding-top: 11px;

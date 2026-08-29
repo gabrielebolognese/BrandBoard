@@ -402,12 +402,29 @@ export function createCheckout({ settings, onChange, onReserved, onConflict }) {
 
     const totals = document.createElement("div");
     totals.className = "totals";
+
+    totals.append(row("Tiles", `${money(session.monthlySubtotalCents)}/mo`));
+    if (session.floorApplied) {
+      // Said plainly rather than buried: the order is under the minimum and is
+      // being charged the minimum.
+      totals.append(
+        row("Minimum charge", `${money(session.monthlyTotalCents)}/mo`, "totals-note"),
+      );
+    }
+    totals.append(row("Billed", `Yearly, ${session.months} months up front`));
+
     const grand = document.createElement("div");
     grand.className = "totals-row totals-grand";
     grand.innerHTML =
-      `<span>Total</span><span class="totals-amount">${money(session.monthlyTotalCents)}` +
-      `<small>/mo</small></span>`;
+      `<span>Total today</span><span class="totals-amount">${money(session.termTotalCents)}` +
+      `<small>/yr</small></span>`;
     totals.append(grand);
+
+    const perMonth = document.createElement("p");
+    perMonth.className = "caption";
+    perMonth.textContent = `That is ${money(session.monthlyTotalCents)} a month, paid once a year.`;
+    totals.append(perMonth);
+
     modal.body.append(totals);
 
     modal.footer.textContent = "";
@@ -464,7 +481,7 @@ export function createCheckout({ settings, onChange, onReserved, onConflict }) {
 
     modal.footer.append(
       caption(
-        `Order ${session.id.slice(0, 16)}. Billed monthly, cancel any time. ` +
+        `Order ${session.id.slice(0, 16)}. Renews yearly, cancel any time. ` +
           "Your planet goes into review before it appears.",
       ),
     );
@@ -547,6 +564,17 @@ export function createCheckout({ settings, onChange, onReserved, onConflict }) {
     el.type = "button";
     el.className = `btn btn-${kind}`;
     el.textContent = label;
+    return el;
+  }
+
+  function row(label, value, extra) {
+    const el = document.createElement("div");
+    el.className = extra === undefined ? "totals-row" : `totals-row ${extra}`;
+    const l = document.createElement("span");
+    l.textContent = label;
+    const v = document.createElement("span");
+    v.textContent = value;
+    el.append(l, v);
     return el;
   }
 

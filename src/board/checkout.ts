@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { BILLING_PERIOD, RESERVATION_TTL_MINUTES, monthlyPriceCents, orbitAt } from "../config.js";
+import {
+  BILLING_INTERVAL,
+  RESERVATION_TTL_MINUTES,
+  monthlyPriceCents,
+  orbitAt,
+  orderTotals,
+} from "../config.js";
 import { claimBlocks } from "./claim.js";
 import type { Placement } from "./geometry.js";
 
@@ -29,14 +35,21 @@ export interface CheckoutLine {
 
 export interface Checkout {
   readonly id: string;
-  readonly provider: "paddle";
+  readonly provider: "polar";
   /** False until the payment provider is actually wired up. */
   readonly ready: boolean;
   readonly currency: "USD";
-  readonly billingPeriod: typeof BILLING_PERIOD;
+  readonly interval: typeof BILLING_INTERVAL;
   readonly lines: CheckoutLine[];
   readonly tiles: number;
+  /** What the tiles come to per month, before the floor. */
+  readonly monthlySubtotalCents: number;
+  /** What is charged per month of the term, floor included. */
   readonly monthlyTotalCents: number;
+  /** The single figure that leaves the account. */
+  readonly termTotalCents: number;
+  readonly floorApplied: boolean;
+  readonly months: number;
   /** When the reservation lapses and the tiles go back on sale. */
   readonly expiresAt: Date;
 }
@@ -76,20 +89,20 @@ export async function createCheckout(
   });
 
   const tiles = lines.reduce((sum, line) => sum + line.tiles, 0);
+  const totals = orderTotals(lines.map((line) => line.monthlyCents));
   const expiresAt =
     blocks[0]?.reservedUntil ??
     new Date(Date.now() + (options.reservationMinutes ?? RESERVATION_TTL_MINUTES) * 60_000);
 
   return {
     id,
-    provider: "paddle",
-    // Flipped on once Paddle is connected and this returns a real pay link.
+    provider: "polar",
+    // Flipped on once Polar is connected and this returns a real pay link.
     ready: false,
     currency: "USD",
-    billingPeriod: BILLING_PERIOD,
     lines,
     tiles,
-    monthlyTotalCents: lines.reduce((sum, line) => sum + line.monthlyCents, 0),
+    ...totals,
     expiresAt,
   };
 }

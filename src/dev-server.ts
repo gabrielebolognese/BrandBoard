@@ -39,7 +39,7 @@ import { availabilityBitmap, buildManifest, heldTileCount } from "./board/manife
 import { currentlyWatching, startWatchingTicker } from "./board/watching.js";
 import {
   AURAS,
-  BILLING_PERIOD,
+  BILLING_INTERVAL,
   BOARD_CENTER,
   BOARD_SIZE,
   FEATURED_MAX_DAYS,
@@ -51,12 +51,15 @@ import {
   TILE_INSET,
   TILE_PIXELS,
   UNIVERSE_RADIUS,
+  MONTHLY_FLOOR_CENTS,
+  MONTHS_PER_TERM,
   TRIAL_DAYS,
   estimatedMonthlyClicks,
   featuredPriceCents,
   isValidFeaturedDays,
   monthlyPriceCents,
   orbitAt,
+  orderTotals,
   sizeCapAt,
 } from "./config.js";
 import { createPool } from "./db/client.js";
@@ -257,7 +260,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (path === "/api/claim") return claim(req, res);
     if (path === "/api/checkout") return checkout(req, res);
     if (path === "/api/featured") return buyFeatured(req, res);
-    if (path === "/api/webhooks/paddle") return paddleWebhook(req, res);
+    if (path === "/api/webhooks/polar") return polarWebhook(req, res);
 
     const upload = /^\/api\/upload\/(chk_[0-9a-f-]{36})$/.exec(path);
     if (upload?.[1] !== undefined) return uploadAvatar(req, res, upload[1]);
@@ -450,7 +453,9 @@ async function stats(pool: Pool): Promise<unknown> {
     orbits: ORBITS,
     auras: AURAS,
     trialDays: TRIAL_DAYS,
-    billingPeriod: BILLING_PERIOD,
+    interval: BILLING_INTERVAL,
+    monthsPerTerm: MONTHS_PER_TERM,
+    monthlyFloorCents: MONTHLY_FLOOR_CENTS,
   };
 }
 
@@ -479,14 +484,15 @@ async function boardState(pool: Pool): Promise<unknown> {
  */
 function quote(x: number, y: number, size: number): unknown {
   const middle = Math.floor(size / 2);
+  const monthlyCents = monthlyPriceCents(x, y, size);
   return {
     x,
     y,
     size,
     tiles: size * size,
-    monthlyCents: monthlyPriceCents(x, y, size),
+    monthlyCents,
+    ...orderTotals([monthlyCents]),
     orbit: orbitAt(x + middle, y + middle)?.label ?? "Void",
-    billingPeriod: BILLING_PERIOD,
   };
 }
 
@@ -657,7 +663,7 @@ async function readRawBinary(req: IncomingMessage, maxBytes: number): Promise<Bu
  * Steps two and three are what make this safe to expose. Without the first, the
  * second silently never works.
  */
-async function paddleWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function polarWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let rawBody: string;
   try {
     rawBody = await readRawBody(req);
@@ -665,21 +671,23 @@ async function paddleWebhook(req: IncomingMessage, res: ServerResponse): Promise
     return badRequest(res, error);
   }
 
-  const secret = process.env["PADDLE_WEBHOOK_SECRET"];
+  const secret = process.env["POLAR_WEBHOOK_SECRET"];
   if (secret === undefined || secret === "") {
-    // Refusing beats accepting unsigned deliveries. Paddle is not wired yet, so
+    // Refusing beats accepting unsigned deliveries. Polar is not wired yet, so
     // this is the expected answer until a secret exists.
     return sendJson(res, 503, {
       error: "webhook_secret_not_configured",
       message:
-        "PADDLE_WEBHOOK_SECRET is not set, so signatures cannot be checked and no delivery " +
+        "POLAR_WEBHOOK_SECRET is not set, so signatures cannot be checked and no delivery " +
         "will be accepted.",
     });
   }
 
   const signature = verifyWebhookSignature({
     rawBody,
-    header: header(req, "paddle-signature"),
+    id: header(req, "webhook-id"),
+    timestamp: header(req, "webhook-timestamp"),
+    signature: header(req, "webhook-signature"),
     secret,
   });
   if (!signature.valid) {
@@ -689,17 +697,20 @@ async function paddleWebhook(req: IncomingMessage, res: ServerResponse): Promise
     return sendJson(res, 401, { error: "invalid_signature" });
   }
 
-  let event: { event_id?: unknown; event_type?: unknown; data?: unknown };
+  let event: { type?: unknown; data?: unknown };
   try {
     event = JSON.parse(rawBody) as typeof event;
   } catch {
     return sendJson(res, 400, { error: "bad_request", message: "body is not valid JSON" });
   }
 
-  const eventId = typeof event.event_id === "string" ? event.event_id : null;
-  const eventType = typeof event.event_type === "string" ? event.event_type : null;
+  const eventType = typeof event.type === "string" ? event.type : null;
+  // The delivery id from the signed headers is the idempotency key: it is the
+  // thing the provider repeats when it retries, and it is covered by the
+  // signature, so it cannot be forged into a fresh delivery.
+  const eventId = header(req, "webhook-id") ?? null;
   if (eventId === null || eventType === null) {
-    return sendJson(res, 400, { error: "bad_request", message: "missing event_id or event_type" });
+    return sendJson(res, 400, { error: "bad_request", message: "missing delivery id or type" });
   }
 
   const recorded = await recordWebhookEvent(pool, {
@@ -733,7 +744,10 @@ async function applyEvent(
   const payload = (data ?? {}) as Record<string, unknown>;
 
   switch (eventType) {
-    case "transaction.completed": {
+    // Polar sends order.paid once the money has actually settled; the
+    // subscription events follow it.
+    case "order.paid":
+    case "order.created": {
       const checkoutId = customData(payload)["checkoutId"];
       if (typeof checkoutId !== "string") {
         return { summary: "no checkoutId in custom_data", body: { ignored: true } };
@@ -741,7 +755,8 @@ async function applyEvent(
 
       const result = await fulfilPayment(pool, {
         checkoutId,
-        subscriptionId: typeof payload["subscription_id"] === "string" ? payload["subscription_id"] : null,
+        subscriptionId:
+          typeof payload["subscription_id"] === "string" ? payload["subscription_id"] : null,
         currentPeriodEnd: periodEnd(payload),
       });
 
@@ -754,7 +769,7 @@ async function applyEvent(
     }
 
     case "subscription.canceled":
-    case "subscription.paused": {
+    case "subscription.revoked": {
       const id = payload["id"];
       if (typeof id !== "string") {
         return { summary: "no subscription id", body: { ignored: true } };
@@ -773,18 +788,25 @@ async function applyEvent(
   }
 }
 
+/**
+ * Where the order id rides along. Polar calls it metadata; the point is that it
+ * is set when the checkout is created and comes back untouched, so the webhook
+ * knows which planets it is about without matching on amounts.
+ */
 function customData(payload: Record<string, unknown>): Record<string, unknown> {
-  const custom = payload["custom_data"];
+  const custom = payload["metadata"] ?? payload["custom_data"];
   return typeof custom === "object" && custom !== null ? (custom as Record<string, unknown>) : {};
 }
 
+/** When the paid term ends, which is what the lapse sweep watches. */
 function periodEnd(payload: Record<string, unknown>): Date | null {
-  const period = payload["billing_period"];
-  if (typeof period !== "object" || period === null) return null;
-  const endsAt = (period as Record<string, unknown>)["ends_at"];
-  if (typeof endsAt !== "string") return null;
-  const parsed = new Date(endsAt);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  const candidates = [payload["current_period_end"], payload["ends_at"]];
+  for (const value of candidates) {
+    if (typeof value !== "string") continue;
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return null;
 }
 
 function header(req: IncomingMessage, name: string): string | undefined {
@@ -818,8 +840,8 @@ async function readRawBody(req: IncomingMessage): Promise<string> {
  *
  * Everything a real payment needs is in place: the order exists, the tiles are
  * held, and the amount is known. The only missing piece is the provider, so
- * this answers 503 rather than pretending. When Paddle is wired up, this is
- * where the transaction is created and a redirect URL comes back.
+ * this answers 503 rather than pretending. When Polar is wired up, this is
+ * where the checkout is created and a redirect URL comes back.
  */
 async function payCheckout(res: ServerResponse, checkoutId: string): Promise<void> {
   const blocks = await readCheckout(pool, checkoutId);
@@ -844,9 +866,9 @@ async function payCheckout(res: ServerResponse, checkoutId: string): Promise<voi
 
   return sendJson(res, 503, {
     error: "payment_provider_not_configured",
-    provider: "paddle",
+    provider: "polar",
     message:
-      "Paddle is not connected yet, so no charge was attempted. The order is valid and " +
+      "Polar is not connected yet, so no charge was attempted. The order is valid and " +
       "the tiles stay held until the reservation lapses.",
     checkoutId,
     blocks: blocks.length,

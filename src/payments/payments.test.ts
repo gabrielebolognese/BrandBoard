@@ -7,6 +7,7 @@ import { createCheckout } from "../board/checkout.js";
 import { countTiles, createTestUser, hasDatabase, resetBoard, setupTestDatabase } from "../test/db.js";
 import { recordWebhookEvent, unprocessedEvents, markEventProcessed } from "./events.js";
 import { fulfilPayment, outstandingRefunds, settleRefund } from "./fulfilment.js";
+import { MONTHLY_FLOOR_CENTS, orderTotals } from "../config.js";
 import { signPayload, verifyWebhookSignature } from "./signature.js";
 
 import { monthlyPriceCents } from "../config.js";
@@ -15,42 +16,102 @@ import { monthlyPriceCents } from "../config.js";
 const priceOf = (x: number, y: number, size: number) => monthlyPriceCents(x, y, size);
 
 describe("webhook signatures", () => {
-  const secret = "pdl_ntfset_testsecret";
-  const body = '{"event_id":"evt_1","event_type":"transaction.completed"}';
+  const secret = "whsec_dGVzdHNlY3JldGtleWZvcnNpZ25pbmc=";
+  const body = '{"type":"order.paid","data":{"id":"ord_1"}}';
+
+  /** Verifies with the headers a provider would actually send. */
+  function check(overrides = {}) {
+    const signed = signPayload(body, secret);
+    return verifyWebhookSignature({ rawBody: body, secret, ...signed, ...overrides });
+  }
 
   it("accepts a signature the provider would have produced", () => {
-    const header = signPayload(body, secret);
-    expect(verifyWebhookSignature({ rawBody: body, header, secret }).valid).toBe(true);
+    expect(check().valid).toBe(true);
   });
 
   it("refuses a body that was altered after signing", () => {
-    const header = signPayload(body, secret);
-    const tampered = body.replace("evt_1", "evt_2");
-    const result = verifyWebhookSignature({ rawBody: tampered, header, secret });
+    const signed = signPayload(body, secret);
+    const result = verifyWebhookSignature({
+      rawBody: body.replace("ord_1", "ord_2"),
+      secret,
+      ...signed,
+    });
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/does not match/);
   });
 
-  it("refuses the wrong secret", () => {
-    const header = signPayload(body, secret);
-    expect(verifyWebhookSignature({ rawBody: body, header, secret: "wrong" }).valid).toBe(false);
+  /**
+   * The delivery id is inside the signed content, so a captured delivery
+   * cannot be replayed claiming to be a different one.
+   */
+  it("refuses a signature reused under another delivery id", () => {
+    expect(check({ id: "msg_someone_elses" }).valid).toBe(false);
   });
 
-  /** A captured delivery must not stay replayable forever. */
+  it("refuses the wrong secret", () => {
+    const signed = signPayload(body, secret);
+    expect(
+      verifyWebhookSignature({ rawBody: body, secret: "whsec_d3Jvbmc=", ...signed }).valid,
+    ).toBe(false);
+  });
+
   it("refuses a stale signature", () => {
     const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
-    const header = signPayload(body, secret, twoHoursAgo);
-    const result = verifyWebhookSignature({ rawBody: body, header, secret });
+    const signed = signPayload(body, secret, "msg_old", twoHoursAgo);
+    const result = verifyWebhookSignature({ rawBody: body, secret, ...signed });
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/out of date/);
   });
 
+  it("accepts one good signature among several, as during a key rotation", () => {
+    const signed = signPayload(body, secret);
+    const mixed = `v1,not-the-one ${signed.signature}`;
+    expect(
+      verifyWebhookSignature({ rawBody: body, secret, ...signed, signature: mixed }).valid,
+    ).toBe(true);
+  });
+
   it("refuses when anything is missing, rather than defaulting to allow", () => {
-    const header = signPayload(body, secret);
-    expect(verifyWebhookSignature({ rawBody: body, header, secret: undefined }).valid).toBe(false);
-    expect(verifyWebhookSignature({ rawBody: body, header: undefined, secret }).valid).toBe(false);
-    expect(verifyWebhookSignature({ rawBody: body, header: "garbage", secret }).valid).toBe(false);
-    expect(verifyWebhookSignature({ rawBody: body, header: "ts=1;h1=", secret }).valid).toBe(false);
+    expect(check({ secret: undefined }).valid).toBe(false);
+    expect(check({ id: undefined }).valid).toBe(false);
+    expect(check({ timestamp: undefined }).valid).toBe(false);
+    expect(check({ signature: undefined }).valid).toBe(false);
+    expect(check({ signature: "garbage" }).valid).toBe(false);
+    expect(check({ signature: "v1," }).valid).toBe(false);
+  });
+});
+
+describe("what an order costs", () => {
+  it("charges a year at a time", () => {
+    const totals = orderTotals([2000]);
+    expect(totals.months).toBe(12);
+    expect(totals.interval).toBe("year");
+    expect(totals.termTotalCents).toBe(2000 * 12);
+  });
+
+  /**
+   * The reason the floor exists: card processing on a dollar costs a third of
+   * it, so the smallest planets are charged the floor rather than refused.
+   */
+  it("lifts an order under the floor up to it, and says so", () => {
+    const totals = orderTotals([100]);
+    expect(totals.monthlySubtotalCents).toBe(100);
+    expect(totals.monthlyTotalCents).toBe(MONTHLY_FLOOR_CENTS);
+    expect(totals.termTotalCents).toBe(MONTHLY_FLOOR_CENTS * 12);
+    expect(totals.floorApplied).toBe(true);
+  });
+
+  it("leaves an order above the floor alone", () => {
+    const totals = orderTotals([300, 400]);
+    expect(totals.monthlyTotalCents).toBe(700);
+    expect(totals.floorApplied).toBe(false);
+  });
+
+  it("applies the floor to the order, not to each planet", () => {
+    // Three one dollar planets are three dollars, which is still under the
+    // floor; they are not three separate five dollar charges.
+    const totals = orderTotals([100, 100, 100]);
+    expect(totals.monthlyTotalCents).toBe(MONTHLY_FLOOR_CENTS);
   });
 });
 
