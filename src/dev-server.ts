@@ -20,6 +20,7 @@ import {
 } from "./board/discovery.js";
 import { ClaimError, TileConflictError } from "./board/errors.js";
 import { deadLinks, runLinkCheckSweep } from "./board/links.js";
+import { changeBlock, changeHistory, quoteChange } from "./board/resize.js";
 import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
@@ -255,6 +256,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const outbound = /^\/go\/([0-9a-f-]{36})$/.exec(path);
     if (outbound?.[1] !== undefined) return sendOutbound(req, res, outbound[1]);
 
+    const history = /^\/api\/block\/([0-9a-f-]{36})\/changes$/.exec(path);
+    if (history?.[1] !== undefined) {
+      return sendJson(res, 200, { changes: await changeHistory(pool, history[1]) });
+    }
+
     const clicks = /^\/api\/block\/([0-9a-f-]{36})\/clicks$/.exec(path);
     if (clicks?.[1] !== undefined) {
       const days = Number(requestUrl.searchParams.get("days") ?? "30");
@@ -324,6 +330,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     const listing = /^\/api\/listing\/(chk_[0-9a-f-]{36})$/.exec(path);
     if (listing?.[1] !== undefined) return putListing(req, res, listing[1]);
+
+    const change = /^\/api\/block\/([0-9a-f-]{36})\/change$/.exec(path);
+    if (change?.[1] !== undefined) return applyChange(req, res, change[1]);
+
+    const changeQuote = /^\/api\/block\/([0-9a-f-]{36})\/change\/quote$/.exec(path);
+    if (changeQuote?.[1] !== undefined) return quoteBlockChange(req, res, changeQuote[1]);
 
     const trial = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/trial$/.exec(path);
     if (trial?.[1] !== undefined) return beginTrial(res, trial[1]);
@@ -969,6 +981,78 @@ async function buyFeatured(req: IncomingMessage, res: ServerResponse): Promise<v
   }
 }
 
+/**
+ * What growing or moving this planet to a given square would do, without doing
+ * it. The board needs this to show a price before anyone commits to anything.
+ */
+async function quoteBlockChange(
+  req: IncomingMessage,
+  res: ServerResponse,
+  blockId: string,
+): Promise<void> {
+  let to: Placement;
+  try {
+    to = parsePlacement((await readJson(req)) as Record<string, unknown>);
+  } catch (error) {
+    return badRequest(res, error);
+  }
+
+  const current = await pool.query<{ x: number; y: number; size: number }>(
+    `SELECT x, y, size FROM blocks WHERE id = $1 AND status = 'live'`,
+    [blockId],
+  );
+  const from = current.rows[0];
+  if (from === undefined) return sendJson(res, 404, { error: "unknown_block" });
+
+  try {
+    return sendJson(res, 200, quoteChange(from, to));
+  } catch (error) {
+    if (error instanceof ClaimError) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
+  }
+}
+
+/**
+ * Performs the change.
+ *
+ * The 409 body carries the same conflict list a failed first claim does,
+ * because the board draws it the same way: the squares that are gone, flashing
+ * red, with the planet exactly where it was.
+ */
+async function applyChange(
+  req: IncomingMessage,
+  res: ServerResponse,
+  blockId: string,
+): Promise<void> {
+  let to: Placement;
+  try {
+    to = parsePlacement((await readJson(req)) as Record<string, unknown>);
+  } catch (error) {
+    return badRequest(res, error);
+  }
+
+  try {
+    const applied = await changeBlock(pool, devUserId, blockId, to);
+    invalidateCompositeBoard();
+    return sendJson(res, 200, applied);
+  } catch (error) {
+    if (error instanceof TileConflictError) {
+      return sendJson(res, error.status, {
+        error: error.code,
+        message: error.message,
+        conflictCount: error.conflictCount,
+        conflicts: error.conflicts,
+      });
+    }
+    if (error instanceof ClaimError) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
+  }
+}
+
 async function claim(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let placements: Placement[];
   try {
@@ -999,6 +1083,13 @@ async function claim(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
 /** A cart bigger than this is not a cart. Bounds the work one request can ask for. */
 const MAX_PLACEMENTS = 64;
+
+/** One square, from a body that is only ever {x, y, size}. */
+function parsePlacement(input: Record<string, unknown>): Placement {
+  const [placement] = parsePlacements([input]);
+  if (placement === undefined) throw new Error("expected x, y and size");
+  return placement;
+}
 
 function parsePlacements(input: unknown): Placement[] {
   if (!Array.isArray(input) || input.length === 0) {

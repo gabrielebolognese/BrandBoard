@@ -6,7 +6,11 @@ export type ClaimErrorCode =
   | "outside_universe"
   | "size_not_allowed_here"
   | "tile_conflict"
-  | "empty_claim";
+  | "empty_claim"
+  | "unknown_block"
+  | "not_your_block"
+  | "block_not_changeable"
+  | "change_not_allowed";
 
 export abstract class ClaimError extends Error {
   abstract readonly code: ClaimErrorCode;
@@ -119,4 +123,63 @@ export class TileConflictError extends ClaimError {
 export interface ConflictingTile extends Tile {
   /** The block holding it, when known. Null when only the key was reported. */
   readonly blockId: string | null;
+}
+
+/**
+ * Asked to change a planet that is not there.
+ *
+ * Separate from "not yours" on purpose: a planet that lapsed last week is gone
+ * for everyone, and telling its former owner it belongs to someone else would
+ * be both wrong and alarming.
+ */
+export class UnknownBlockError extends ClaimError {
+  readonly code = "unknown_block";
+  readonly status = 404;
+
+  constructor(readonly blockId: string) {
+    super("That planet is not on the board.");
+    this.name = "UnknownBlockError";
+  }
+}
+
+export class NotYourBlockError extends ClaimError {
+  readonly code = "not_your_block";
+  readonly status = 403;
+
+  constructor(readonly blockId: string) {
+    super("That planet belongs to someone else.");
+    this.name = "NotYourBlockError";
+  }
+}
+
+/** Only a planet that is actually on the board can be grown or moved. */
+export class BlockNotChangeableError extends ClaimError {
+  readonly code = "block_not_changeable";
+  readonly status = 409;
+
+  constructor(readonly status_: string) {
+    super(
+      status_ === "reserved"
+        ? "That planet has not been paid for yet, so there is nothing to change."
+        : "That planet is not on the board.",
+    );
+    this.name = "BlockNotChangeableError";
+  }
+}
+
+/**
+ * The change itself is not one of the two we offer.
+ *
+ * Growing keeps the ground it already has and takes more; moving keeps its size
+ * and goes somewhere else. Everything else -- shrinking, or a "grow" that
+ * quietly relocates -- is refused here rather than half-performed.
+ */
+export class ChangeNotAllowedError extends ClaimError {
+  readonly code = "change_not_allowed";
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ChangeNotAllowedError";
+  }
 }

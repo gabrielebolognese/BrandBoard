@@ -227,9 +227,9 @@ async function occupyTiles(tx: Queryable, blocks: readonly ClaimedBlock[]): Prom
  * a busy board would otherwise return thousands of coordinates in the 409. The
  * count is reported in full.
  */
-const MAX_REPORTED_CONFLICTS = 256;
+export const MAX_REPORTED_CONFLICTS = 256;
 
-async function describeConflicts(
+export async function describeConflicts(
   pool: Pool,
   requestedTiles: readonly Tile[],
   error: unknown,
@@ -259,6 +259,6 @@ async function describeConflicts(
   return { conflicts, total: Math.max(total, conflicts.length) };
 }
 
-function sortTiles<T extends Tile>(tiles: T[]): T[] {
+export function sortTiles<T extends Tile>(tiles: T[]): T[] {
   return [...tiles].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
 }
