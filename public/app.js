@@ -7,6 +7,8 @@
 import { createCheckout } from "./checkout.js";
 import { getJson, postJson } from "./http.js";
 import { createFeaturedColumn } from "./featured.js";
+import { createDirectory } from "./directory.js";
+import { createShare } from "./share.js";
 
 let BOARD = 300;
 
@@ -162,6 +164,32 @@ function minScale() {
 
 function maxScale() {
   return 96 / TILE;
+}
+
+/**
+ * Puts a planet in the middle of the view, close enough to see.
+ *
+ * Search is useless if finding the row does not find the planet. The zoom is
+ * chosen so the square fills about a fifth of the shorter side: close enough to
+ * recognise a face, far enough that its neighbours are still there for context.
+ */
+function focusOnBlock(entry) {
+  const rect = viewport.getBoundingClientRect();
+  const shorter = Math.min(rect.width, rect.height);
+  const wanted = shorter / 5 / (entry.size * TILE);
+
+  scale = Math.min(maxScale(), Math.max(minScale(), wanted));
+
+  const centreX = (entry.x + entry.size / 2) * TILE * scale;
+  const centreY = (entry.y + entry.size / 2) * TILE * scale;
+  originX = rect.width / 2 - centreX;
+  originY = rect.height / 2 - centreY;
+
+  clampView();
+  // The same flash a conflict uses, in a friendly colour: it says "here",
+  // without needing a permanent marker on the board.
+  flashes.push({ x: entry.x, y: entry.y, size: entry.size, born: performance.now(), kind: "find" });
+  dirty = true;
 }
 
 function clampView() {
@@ -806,7 +834,8 @@ function drawFlashes() {
   flashes = flashes.filter((flash) => now - flash.born < 1400);
   for (const flash of flashes) {
     const life = 1 - (now - flash.born) / 1400;
-    const rgb = flash.kind === "ok" ? "74,222,128" : "242,84,91";
+    const rgb =
+      flash.kind === "ok" ? "74,222,128" : flash.kind === "find" ? "122,162,255" : "242,84,91";
     const { cx, cy, radius } = orbitOf(flash);
 
     ctx.save();
@@ -891,6 +920,10 @@ function showCard(block, clientX, clientY) {
       }
     });
   }
+
+  const warning = document.getElementById("card-warning");
+  warning.hidden = cached?.link_ok !== false;
+  if (!warning.hidden) warning.textContent = "This link has not been answering.";
 
   card.hidden = false;
   card.style.left = `${Math.min(clientX + 18, window.innerWidth - 266)}px`;
@@ -1131,13 +1164,22 @@ const featured = createFeaturedColumn({
   },
 });
 
+const share = createShare();
+
+const directory = createDirectory({
+  panelEl: document.getElementById("directory"),
+  toggleEl: document.getElementById("dir-toggle"),
+  onFocus: focusOnBlock,
+  onShare: (entry) => void share.open(entry),
+});
+
 const checkout = createCheckout({
   settings: () => ({ auras, trialDays }),
   onChange: () => {
     dirty = true;
   },
   onReserved: async () => {
-    await Promise.all([loadAvailability(), loadStats()]);
+    await Promise.all([loadAvailability(), loadStats(), directory.reload()]);
     dirty = true;
   },
   onConflict: (body) => {
@@ -1157,6 +1199,7 @@ void Promise.all([
   loadManifest().then(() => featured.refresh()),
   loadAvailability(),
   featured.loadPricing(),
+  directory.reload(),
 ]);
 
 // The watching count is server state that drifts once a minute, so poll for it

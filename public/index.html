@@ -18,6 +18,8 @@
         <span class="sep"></span>
         <span id="stat-live">0</span> planets
       </div>
+      <button type="button" class="dir-toggle" id="dir-toggle" aria-expanded="false"
+              aria-controls="directory">Browse</button>
       <div class="dev">
         <button type="button" data-action="sweep">Sweep</button>
         <button type="button" data-action="reset">Reset</button>
@@ -35,6 +37,18 @@
       </div>
     </main>
 
+    <aside class="directory" id="directory" hidden aria-label="Browse the universe">
+      <div class="dir-head">
+        <input type="search" data-role="search" class="dir-search"
+               placeholder="Search planets" aria-label="Search planets" />
+        <button type="button" data-role="close" class="dir-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="dir-scarcity" data-role="scarcity"></div>
+      <div class="dir-chips" data-role="chips"></div>
+      <p class="dir-count" data-role="count"></p>
+      <div class="dir-results" data-role="results"></div>
+    </aside>
+
     <div class="badge" id="badge" hidden></div>
 
 
@@ -44,6 +58,7 @@
         <p class="card-name" id="card-name"></p>
         <p class="card-handle" id="card-handle"></p>
         <div class="card-links" id="card-links"></div>
+        <p class="card-warning" id="card-warning" hidden></p>
       </div>
     </div>
 

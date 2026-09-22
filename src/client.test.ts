@@ -45,6 +45,10 @@ function stubElement(): Record<string, unknown> {
     hidden: false,
     textContent: "",
     innerHTML: "",
+    // Inputs read their own value on boot, and an element without one throws
+    // where the real page would simply have found an empty box.
+    value: "",
+    readOnly: false,
     clientWidth: 150,
     offsetParent: {},
     width: 1200,
@@ -57,6 +61,7 @@ function stubElement(): Record<string, unknown> {
     setAttribute() {},
     getAttribute: () => null,
     focus() {},
+    select() {},
     remove() {},
     hasPointerCapture: () => false,
     setPointerCapture() {},
@@ -100,6 +105,18 @@ function stubFetch(): void {
     },
     "/api/availability": { boardSize: 300, bits: bitmap, heldTiles: 0 },
     "/api/featured": { slots: 5, blocks: [] },
+    "/api/orbits": {
+      orbits: [
+        { name: "core", label: "Core", capacity: 1264, taken: 12, remaining: 1252, fraction: 0.01 },
+      ],
+    },
+    "/api/categories": { categories: [{ category: "music", count: 2 }] },
+    "/api/directory": {
+      total: 2,
+      entries: [
+        { id: "a", x: 150, y: 150, size: 2, name: "A", handle: "a", category: "music", clicks: 4 },
+      ],
+    },
   };
 
   vi.stubGlobal("fetch", (url: string) => {
