@@ -47,6 +47,12 @@ import { markEventProcessed, recordWebhookEvent } from "./payments/events.js";
 import { fulfilPayment } from "./payments/fulfilment.js";
 import { verifyWebhookSignature } from "./payments/signature.js";
 import {
+  PolarError,
+  createCheckout as createPolarCheckout,
+  interpretEvent,
+  readPolarConfig,
+} from "./payments/polar.js";
+import {
   BlockNotLiveError,
   InvalidFeaturedDaysError,
   UnknownBlockError,
@@ -367,7 +373,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
 
     const pay = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/pay$/.exec(path);
-    if (pay?.[1] !== undefined) return payCheckout(res, pay[1]);
+    if (pay?.[1] !== undefined) return payCheckout(req, res, pay[1]);
     if (path === "/api/sweep") return sendJson(res, 200, await runReservationSweep(pool));
     if (path === "/api/sweep/links") return sendJson(res, 200, await runLinkCheckSweep(pool));
     if (path === "/api/reset") {
@@ -868,7 +874,7 @@ async function polarWebhook(req: IncomingMessage, res: ServerResponse): Promise<
       error: "webhook_secret_not_configured",
       message:
         "POLAR_WEBHOOK_SECRET is not set, so signatures cannot be checked and no delivery " +
-        "will be accepted.",
+        "will be accepted. Refusing beats trusting an unsigned body.",
     });
   }
 
@@ -903,7 +909,7 @@ async function polarWebhook(req: IncomingMessage, res: ServerResponse): Promise<
   }
 
   const recorded = await recordWebhookEvent(pool, {
-    provider: "paddle",
+    provider: "polar",
     eventId,
     eventType,
     payload: event,
@@ -926,28 +932,28 @@ async function polarWebhook(req: IncomingMessage, res: ServerResponse): Promise<
  * which subscription; what that costs, and what any refund is worth, is derived
  * from the blocks themselves.
  */
+/**
+ * One delivery, one decision, carried out.
+ *
+ * What an event means lives in payments/polar.ts, where it can be tested
+ * without a socket. This is only the part that touches the database, and every
+ * branch returns a summary, because the summary is what someone reads when a
+ * customer asks what happened to their order.
+ */
 async function applyEvent(
   eventType: string,
   data: unknown,
 ): Promise<{ summary: string; body: Record<string, unknown> }> {
-  const payload = (data ?? {}) as Record<string, unknown>;
+  const action = interpretEvent(eventType, data);
 
-  switch (eventType) {
-    // Polar sends order.paid once the money has actually settled; the
-    // subscription events follow it.
-    case "order.paid":
-    case "order.created": {
-      const checkoutId = customData(payload)["checkoutId"];
-      if (typeof checkoutId !== "string") {
-        return { summary: "no checkoutId in custom_data", body: { ignored: true } };
-      }
-
+  switch (action.kind) {
+    case "fulfil": {
       const result = await fulfilPayment(pool, {
-        checkoutId,
-        subscriptionId:
-          typeof payload["subscription_id"] === "string" ? payload["subscription_id"] : null,
-        currentPeriodEnd: periodEnd(payload),
+        checkoutId: action.checkoutId,
+        subscriptionId: action.subscriptionId,
+        currentPeriodEnd: action.currentPeriodEnd,
       });
+      invalidateCompositeBoard();
 
       return {
         summary:
@@ -957,13 +963,39 @@ async function applyEvent(
       };
     }
 
-    case "subscription.canceled":
-    case "subscription.revoked": {
-      const id = payload["id"];
-      if (typeof id !== "string") {
-        return { summary: "no subscription id", body: { ignored: true } };
+    case "feature": {
+      try {
+        const slot = await featureBlock(pool, action.blockId, action.days);
+        return {
+          summary: `featured ${action.blockId} for ${action.days} day(s)`,
+          body: { featured: slot },
+        };
+      } catch (error) {
+        // The money has already been taken, so this cannot throw its way out of
+        // the handler: that would make Polar retry forever against a block that
+        // is never going to be featurable.
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`could not feature ${action.blockId}: ${message}`);
+        return { summary: `could not feature: ${message}`, body: { failed: true } };
       }
-      const lapsed = await lapseSubscription(pool, id);
+    }
+
+    case "renew": {
+      const renewed = await pool.query(
+        `UPDATE blocks
+            SET current_period_end = coalesce($2::timestamptz, current_period_end)
+          WHERE subscription_id = $1`,
+        [action.subscriptionId, action.currentPeriodEnd],
+      );
+      return {
+        summary: `renewed ${renewed.rowCount ?? 0} block(s) to ${action.currentPeriodEnd?.toISOString() ?? "no new date"}`,
+        body: { renewed: renewed.rowCount ?? 0 },
+      };
+    }
+
+    case "lapse": {
+      const lapsed = await lapseSubscription(pool, action.subscriptionId);
+      invalidateCompositeBoard();
       return {
         summary: `lapsed ${lapsed.blocks.length} block(s), freed ${lapsed.tilesReleased} tile(s)`,
         body: { lapsed },
@@ -973,29 +1005,8 @@ async function applyEvent(
     default:
       // Recorded, acknowledged, and deliberately not acted on. Everything a
       // provider sends is stored either way, so an unhandled type is visible.
-      return { summary: `ignored ${eventType}`, body: { ignored: true } };
+      return { summary: action.reason, body: { ignored: true } };
   }
-}
-
-/**
- * Where the order id rides along. Polar calls it metadata; the point is that it
- * is set when the checkout is created and comes back untouched, so the webhook
- * knows which planets it is about without matching on amounts.
- */
-function customData(payload: Record<string, unknown>): Record<string, unknown> {
-  const custom = payload["metadata"] ?? payload["custom_data"];
-  return typeof custom === "object" && custom !== null ? (custom as Record<string, unknown>) : {};
-}
-
-/** When the paid term ends, which is what the lapse sweep watches. */
-function periodEnd(payload: Record<string, unknown>): Date | null {
-  const candidates = [payload["current_period_end"], payload["ends_at"]];
-  for (const value of candidates) {
-    if (typeof value !== "string") continue;
-    const parsed = new Date(value);
-    if (!Number.isNaN(parsed.getTime())) return parsed;
-  }
-  return null;
 }
 
 function header(req: IncomingMessage, name: string): string | undefined {
@@ -1032,7 +1043,11 @@ async function readRawBody(req: IncomingMessage): Promise<string> {
  * this answers 503 rather than pretending. When Polar is wired up, this is
  * where the checkout is created and a redirect URL comes back.
  */
-async function payCheckout(res: ServerResponse, checkoutId: string): Promise<void> {
+async function payCheckout(
+  req: IncomingMessage,
+  res: ServerResponse,
+  checkoutId: string,
+): Promise<void> {
   const blocks = await readCheckout(pool, checkoutId);
 
   if (blocks.length === 0) {
@@ -1053,15 +1068,54 @@ async function payCheckout(res: ServerResponse, checkoutId: string): Promise<voi
     });
   }
 
-  return sendJson(res, 503, {
-    error: "payment_provider_not_configured",
-    provider: "polar",
-    message:
-      "Polar is not connected yet, so no charge was attempted. The order is valid and " +
-      "the tiles stay held until the reservation lapses.",
-    checkoutId,
-    blocks: blocks.length,
-  });
+  const polar = readPolarConfig();
+  if (!polar.ok) {
+    return sendJson(res, 503, {
+      error: "payment_provider_not_configured",
+      provider: "polar",
+      message:
+        `Polar is not connected: ${polar.missing.join(", ")} ${polar.missing.length === 1 ? "is" : "are"} not set. ` +
+        "No charge was attempted, and the tiles stay held until the reservation lapses.",
+      missing: polar.missing,
+      checkoutId,
+      blocks: blocks.length,
+    });
+  }
+
+  // Priced here, from the squares the database says are in this order. The
+  // browser sent an id and nothing else, which is the point: a price that
+  // arrives in a request body is a price the buyer chose.
+  const totals = orderTotals(blocks.map((block) => monthlyPriceCents(block.x, block.y, block.size)));
+
+  try {
+    const session = await createPolarCheckout(polar.config, {
+      productId: polar.config.subscriptionProductId,
+      amountCents: totals.termTotalCents,
+      successUrl: `${originOf(req)}/?paid=${encodeURIComponent(checkoutId)}`,
+      metadata: { kind: "subscription", checkout_id: checkoutId, blocks: blocks.length },
+    });
+
+    return sendJson(res, 200, {
+      checkoutId,
+      provider: "polar",
+      redirectUrl: session.url,
+      sessionId: session.id,
+      amountCents: totals.termTotalCents,
+      months: totals.months,
+    });
+  } catch (error) {
+    if (error instanceof PolarError) {
+      // Polar refusing an order is not this server failing, and the buyer needs
+      // to know their tiles are still held while they work out what happened.
+      console.error(`polar checkout failed for ${checkoutId}: ${error.message}`);
+      return sendJson(res, 502, {
+        error: "payment_provider_error",
+        message: "The payment provider would not open a checkout. Your tiles are still held.",
+        checkoutId,
+      });
+    }
+    throw error;
+  }
 }
 
 /** Buys a featured window for a block. The clock starts now, not at midnight. */
@@ -1080,14 +1134,51 @@ async function buyFeatured(req: IncomingMessage, res: ServerResponse): Promise<v
   }
 
   try {
-    const slot = await featureBlock(pool, blockId, days);
-    return sendJson(res, 201, {
-      ...slot,
+    if (!isValidFeaturedDays(days)) throw new InvalidFeaturedDaysError(days);
+
+    const polar = readPolarConfig();
+    if (!polar.ok) {
+      // Without a provider the slot is granted outright, because the whole
+      // point of the dev harness is to see the column fill up. A configured
+      // deployment never reaches this branch.
+      const slot = await featureBlock(pool, blockId, days);
+      return sendJson(res, 201, { ...slot, days, charged: false, provider: null });
+    }
+
+    // Checked before taking money, so nobody pays for a slot that could never
+    // be shown. featureBlock checks it again when the webhook lands, because by
+    // then the block may have gone.
+    const target = await pool.query<{ status: string }>(
+      `SELECT status FROM blocks WHERE id = $1`,
+      [blockId],
+    );
+    const status = target.rows[0]?.status;
+    if (status === undefined) throw new UnknownBlockError(blockId);
+    if (status !== "live") throw new BlockNotLiveError(status);
+
+    const session = await createPolarCheckout(polar.config, {
+      productId: polar.config.featuredProductId,
+      amountCents: featuredPriceCents(days),
+      successUrl: `${originOf(req)}/?featured=${encodeURIComponent(blockId)}`,
+      metadata: { kind: "featured", block_id: blockId, days },
+    });
+
+    return sendJson(res, 200, {
+      provider: "polar",
+      redirectUrl: session.url,
+      sessionId: session.id,
       days,
-      // Paddle is not wired, so nothing was charged for this either.
+      amountCents: featuredPriceCents(days),
       charged: false,
     });
   } catch (error) {
+    if (error instanceof PolarError) {
+      console.error(`polar featured checkout failed for ${blockId}: ${error.message}`);
+      return sendJson(res, 502, {
+        error: "payment_provider_error",
+        message: "The payment provider would not open a checkout. Nothing was charged.",
+      });
+    }
     if (
       error instanceof InvalidFeaturedDaysError ||
       error instanceof UnknownBlockError ||

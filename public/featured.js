@@ -247,6 +247,13 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
     const response = await postJson("/api/featured", { blockId: chosen, days });
     const body = response.body;
 
+    // With a provider configured this is a redirect to pay; the slot itself is
+    // granted by the webhook once the money lands, not here.
+    if (response.status === 200 && body?.redirectUrl !== undefined) {
+      window.location.href = body.redirectUrl;
+      return;
+    }
+
     if (response.status !== 201 || body === null) {
       renderFooter();
       modal.footer.prepend(
@@ -260,7 +267,7 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
       resultBox(
         "Featured",
         `Live until ${new Date(body.expiresAt).toLocaleString()}. ` +
-          `${money(body.priceCents)} was not charged: Paddle is not connected yet.`,
+          `${money(body.priceCents)} was not charged: no payment provider is connected.`,
       ),
     );
     const done = document.createElement("button");

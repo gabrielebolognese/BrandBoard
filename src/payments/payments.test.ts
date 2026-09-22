@@ -9,6 +9,7 @@ import { recordWebhookEvent, unprocessedEvents, markEventProcessed } from "./eve
 import { fulfilPayment, outstandingRefunds, settleRefund } from "./fulfilment.js";
 import { MONTHLY_FLOOR_CENTS, orderTotals } from "../config.js";
 import { signPayload, verifyWebhookSignature } from "./signature.js";
+import { interpretEvent } from "./polar.js";
 
 import { monthlyPriceCents } from "../config.js";
 
@@ -151,7 +152,7 @@ suite("payments [requires DATABASE_URL]", () => {
 
   describe("webhook idempotency", () => {
     it("records a delivery once, however many times it arrives", async () => {
-      const event = { provider: "paddle", eventId: "evt_1", eventType: "transaction.completed", payload: { a: 1 } };
+      const event = { provider: "polar", eventId: "evt_1", eventType: "transaction.completed", payload: { a: 1 } };
 
       const first = await recordWebhookEvent(pool, event);
       const second = await recordWebhookEvent(pool, event);
@@ -166,15 +167,15 @@ suite("payments [requires DATABASE_URL]", () => {
     });
 
     it("keeps events from different providers apart", async () => {
-      const a = await recordWebhookEvent(pool, { provider: "paddle", eventId: "evt_1", eventType: "x", payload: {} });
+      const a = await recordWebhookEvent(pool, { provider: "polar", eventId: "evt_1", eventType: "x", payload: {} });
       const b = await recordWebhookEvent(pool, { provider: "stripe", eventId: "evt_1", eventType: "x", payload: {} });
       expect(a.duplicate).toBe(false);
       expect(b.duplicate).toBe(false);
     });
 
     it("surfaces deliveries that were never finished", async () => {
-      const one = await recordWebhookEvent(pool, { provider: "paddle", eventId: "e1", eventType: "x", payload: {} });
-      await recordWebhookEvent(pool, { provider: "paddle", eventId: "e2", eventType: "x", payload: {} });
+      const one = await recordWebhookEvent(pool, { provider: "polar", eventId: "e1", eventType: "x", payload: {} });
+      await recordWebhookEvent(pool, { provider: "polar", eventId: "e2", eventType: "x", payload: {} });
       await markEventProcessed(pool, one.id, "done");
 
       const stuck = await unprocessedEvents(pool);
@@ -296,6 +297,112 @@ suite("payments [requires DATABASE_URL]", () => {
         checkoutId: "chk_00000000-0000-0000-0000-000000000000",
       });
       expect(result.status).toBe("unknown_checkout");
+    });
+  });
+
+  /**
+   * The join.
+   *
+   * Signatures, interpretation and fulfilment each have their own tests, and
+   * each passing says nothing about whether they fit together. This takes a
+   * body shaped like one Polar actually sends, signs it the way Polar signs it,
+   * and walks it all the way to a delivered planet.
+   */
+  describe("a delivery, end to end", () => {
+    const secret = "whsec_dGVzdHNlY3JldGtleWZvcnNpZ25pbmc=";
+
+    it("carries a signed order.paid through to a planet in review", async () => {
+      const session = await createCheckout(pool, buyer, [{ x: 140, y: 140, size: 2 }]);
+
+      const rawBody = JSON.stringify({
+        type: "order.paid",
+        data: {
+          id: "ord_live",
+          subscription_id: "sub_live",
+          current_period_end: "2027-09-22T00:00:00.000Z",
+          metadata: { kind: "subscription", checkout_id: session.id },
+        },
+      });
+
+      const signed = signPayload(rawBody, secret, "msg_live");
+      expect(verifyWebhookSignature({ rawBody, secret, ...signed }).valid).toBe(true);
+
+      const delivery = JSON.parse(rawBody) as { type: string; data: unknown };
+      const recorded = await recordWebhookEvent(pool, {
+        provider: "polar",
+        eventId: signed.id,
+        eventType: delivery.type,
+        payload: delivery,
+      });
+      expect(recorded.duplicate).toBe(false);
+
+      const action = interpretEvent(delivery.type, delivery.data);
+      expect(action.kind).toBe("fulfil");
+      if (action.kind !== "fulfil") return;
+
+      const result = await fulfilPayment(pool, {
+        checkoutId: action.checkoutId,
+        subscriptionId: action.subscriptionId,
+        currentPeriodEnd: action.currentPeriodEnd,
+      });
+
+      expect(result.status).toBe("fulfilled");
+      const block = await pool.query<{ status: string; subscription_id: string; current_period_end: Date }>(
+        `SELECT status, subscription_id, current_period_end
+           FROM blocks WHERE checkout_session_id = $1`,
+        [session.id],
+      );
+      expect(block.rows[0]?.status).toBe("pending_review");
+      expect(block.rows[0]?.subscription_id).toBe("sub_live");
+      expect(block.rows[0]?.current_period_end.getUTCFullYear()).toBe(2027);
+    });
+
+    // Polar retries. The second delivery has the same webhook-id, so it stops
+    // at the event table and never reaches the handler at all.
+    it("stops a retry at the event table", async () => {
+      const session = await createCheckout(pool, buyer, [{ x: 144, y: 144, size: 1 }]);
+      const rawBody = JSON.stringify({
+        type: "order.paid",
+        data: { metadata: { kind: "subscription", checkout_id: session.id } },
+      });
+      const signed = signPayload(rawBody, secret, "msg_retry");
+
+      const first = await recordWebhookEvent(pool, {
+        provider: "polar",
+        eventId: signed.id,
+        eventType: "order.paid",
+        payload: JSON.parse(rawBody),
+      });
+      const second = await recordWebhookEvent(pool, {
+        provider: "polar",
+        eventId: signed.id,
+        eventType: "order.paid",
+        payload: JSON.parse(rawBody),
+      });
+
+      expect(first.duplicate).toBe(false);
+      expect(second.duplicate).toBe(true);
+      expect(second.id).toBe(first.id);
+    });
+
+    // Cancelling is not revoking. A square that has been paid for through March
+    // stays on the board until March, and the sweep takes it then.
+    it("leaves a cancelled subscription on the board until its period ends", async () => {
+      const session = await createCheckout(pool, buyer, [{ x: 148, y: 148, size: 1 }]);
+      await fulfilPayment(pool, {
+        checkoutId: session.id,
+        subscriptionId: "sub_cancel",
+        currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000),
+      });
+
+      expect(interpretEvent("subscription.canceled", { id: "sub_cancel" }).kind).toBe("ignore");
+
+      const still = await pool.query<{ status: string }>(
+        `SELECT status FROM blocks WHERE subscription_id = $1`,
+        ["sub_cancel"],
+      );
+      expect(still.rows[0]?.status).toBe("pending_review");
+      expect(await countTiles(pool)).toBe(1);
     });
   });
 

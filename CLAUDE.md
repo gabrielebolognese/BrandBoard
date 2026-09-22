@@ -18,10 +18,17 @@ click recording, the directory with search and categories, scarcity counters,
 link health checks, growing and moving a planet, and share cards, badges and
 per-planet listing pages.
 
-Not built: accounts (everything runs as one hardcoded dev user), the Polar
-checkout call itself (`/pay` answers 503), the review queue interface, a
-dashboard, and a real web framework -- `src/dev-server.ts` is a `node:http`
-harness, not a product server. LAUNCH.md is the plan and the honest inventory.
+Payments go through Polar as merchant of record: two custom-priced products
+(one yearly recurring for planets, one single payment for featured windows),
+priced in `src/payments/polar.ts`. With no `POLAR_*` variables set, `/pay`
+answers 503 naming the ones that are missing and a featured slot is granted
+without charging, so the harness stays usable. The amount is always computed
+from the database rows and never read from a request body.
+
+Not built: accounts (everything runs as one hardcoded dev user, which is what
+now blocks a real purchase), the review queue interface, a dashboard, and a real
+web framework -- `src/dev-server.ts` is a `node:http` harness, not a product
+server. LAUNCH.md is the plan and the honest inventory.
 
 ## Commands
 

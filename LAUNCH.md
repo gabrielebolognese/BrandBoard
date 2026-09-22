@@ -15,7 +15,7 @@ decision gets made, write it down here rather than only in a commit.
 Being honest about this matters, because a plan that assumes more than exists
 will schedule the wrong things.
 
-### Built and tested (209 tests)
+### Built and tested (240 tests)
 
 | Area | State |
 |---|---|
@@ -26,8 +26,9 @@ will schedule the wrong things.
 | Reservations | 15 minute hold, released lazily on every claim and by a sweep every minute |
 | Orbits | 300×300 disc, radius 150. Core `<20` $5, inner belt `<60` $3, outer reach `<150` $1, per tile per month |
 | Pricing | Summed per tile from the orbits, capped in size per orbit. Never accepted from the client |
-| Checkout | Cart → reserve → listing → server-priced order, billed yearly with a $5/month floor. `/pay` answers 503 until Polar is wired |
+| Checkout | Cart → reserve → listing → server-priced order, billed yearly with a $5/month floor, opening a real Polar checkout when it is configured |
 | Payment plumbing | Webhook idempotency, signature verification over raw bytes, fulfilment with refunds for tiles lost mid-payment, subscription lapse both by webhook and by sweep, `refunds_owed` queue |
+| Polar | Two custom-priced products, amount computed server side and never accepted from a request, event interpretation tested apart from the socket, and one test carrying a signed `order.paid` all the way to a planet in review |
 | Review | `approveBlock` / `rejectBlock` exist as functions, with refund on rejection |
 | Featured | Per-purchase windows, 1–10 days, $10 first day then $8. Each runs its own clock |
 | Clicks | Counted through `/go/:id`, once per visitor per day, against a salted hash that changes daily. Daily series and totals for a dashboard |
@@ -41,6 +42,8 @@ will schedule the wrong things.
 ### Not built at all
 
 - **Accounts.** No auth of any kind. Every action runs as one hardcoded dev user.
+  This is now what blocks Polar: a checkout has no customer to attach to and no
+  address to email, so a real purchase cannot be tied to anyone.
 - **Anything to post.** No upload, no image storage, no listing setup screen.
 - **A web framework.** `src/dev-server.ts` is a `node:http` harness with a
   `/api/reset` that truncates the board. It is not a product server.
@@ -268,7 +271,7 @@ A public board of user-uploaded images pointing at arbitrary URLs.
       the deletion path for an account
 - [ ] Cookie banner only if analytics are added; the session cookie alone is
       strictly necessary and does not need one
-- [ ] Company details and VAT handled by Paddle as merchant of record
+- [ ] Company details and VAT handled by Polar as merchant of record
 
 ### P9 — Operations  *(2–3 days)*
 
