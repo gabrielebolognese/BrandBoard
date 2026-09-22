@@ -21,6 +21,15 @@ import {
 import { ClaimError, TileConflictError } from "./board/errors.js";
 import { deadLinks, runLinkCheckSweep } from "./board/links.js";
 import { changeBlock, changeHistory, quoteChange } from "./board/resize.js";
+import {
+  BADGE_HEIGHT,
+  BADGE_WIDTH,
+  embedSnippet,
+  listingPage,
+  renderBadge,
+  renderShareCard,
+  shareSubject,
+} from "./board/share.js";
 import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
@@ -209,6 +218,20 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (asset?.[1] !== undefined) return sendFile(res, new URL(basename(asset[1]), PUBLIC_DIR));
 
     if (path === "/board.webp") return sendCompositeBoard(req, res);
+
+    // The share surface: one page per planet, the card its meta tags point at,
+    // and the badge an owner puts on their own site.
+    const listing = /^\/b\/([\w.-]{1,40})$/.exec(path);
+    if (listing?.[1] !== undefined) return sendListingPage(req, res, listing[1]);
+
+    const card = /^\/card\/([0-9a-f-]{36})\.png$/.exec(path);
+    if (card?.[1] !== undefined) return sendShareCard(res, card[1]);
+
+    const badge = /^\/badge\/([0-9a-f-]{36})\.svg$/.exec(path);
+    if (badge?.[1] !== undefined) return sendBadge(res, badge[1]);
+
+    const embed = /^\/api\/block\/([0-9a-f-]{36})\/embed$/.exec(path);
+    if (embed?.[1] !== undefined) return sendEmbed(req, res, embed[1]);
     if (path === "/api/manifest") return sendManifest(req, res);
     if (path === "/api/availability") return sendAvailability(res);
     if (path === "/api/featured") return sendJson(res, 200, await featured(pool));
@@ -472,6 +495,101 @@ async function sendPlanet(
     etag,
   });
   res.end(image);
+}
+
+/**
+ * Where a shared link lands.
+ *
+ * By handle rather than by id, because this is the address a person puts in
+ * their bio and ids are not for reading.
+ */
+async function sendListingPage(
+  req: IncomingMessage,
+  res: ServerResponse,
+  handle: string,
+): Promise<void> {
+  const subject = await shareSubject(pool, { handle });
+  if (subject === null) {
+    res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+    res.end("<!doctype html><meta charset=utf-8><title>Not here</title>" +
+      "<body style=\"background:#05070f;color:#e6edf9;font-family:sans-serif\">" +
+      "<p>No planet by that name. <a style=color:#7aa2ff href=\"/\">Back to the universe</a>.</p>");
+    return;
+  }
+
+  const html = listingPage(originOf(req), subject);
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "public, max-age=300",
+  });
+  res.end(html);
+}
+
+/**
+ * The card a scraper fetches.
+ *
+ * Cached for an hour and marked immutable for that hour: scrapers refetch
+ * eagerly and the card only changes when the owner edits their listing.
+ */
+async function sendShareCard(res: ServerResponse, id: string): Promise<void> {
+  const subject = await shareSubject(pool, { id });
+  if (subject === null) return sendJson(res, 404, { error: "not_found" });
+
+  const png = await renderShareCard(subject, avatars);
+  res.writeHead(200, {
+    "content-type": "image/png",
+    "content-length": png.length,
+    "cache-control": "public, max-age=3600",
+  });
+  res.end(png);
+}
+
+async function sendBadge(res: ServerResponse, id: string): Promise<void> {
+  const subject = await shareSubject(pool, { id });
+  if (subject === null) return sendJson(res, 404, { error: "not_found" });
+
+  const svg = renderBadge(subject);
+  res.writeHead(200, {
+    "content-type": "image/svg+xml; charset=utf-8",
+    "cache-control": "public, max-age=3600",
+    // It is meant to be hotlinked from the owner's own site. That is the point.
+    "access-control-allow-origin": "*",
+  });
+  res.end(svg);
+}
+
+/** The snippet to copy, and the pieces to build a different one from. */
+async function sendEmbed(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+): Promise<void> {
+  const subject = await shareSubject(pool, { id });
+  if (subject === null) return sendJson(res, 404, { error: "not_found" });
+
+  const origin = originOf(req);
+  sendJson(res, 200, {
+    snippet: embedSnippet(origin, subject),
+    badgeUrl: `${origin}/badge/${subject.id}.svg`,
+    cardUrl: `${origin}/card/${subject.id}.png`,
+    pageUrl: `${origin}/b/${subject.handle}`,
+    width: BADGE_WIDTH,
+    height: BADGE_HEIGHT,
+  });
+}
+
+/**
+ * The address this request arrived on.
+ *
+ * It has to be absolute: a card URL is read by someone else's server, and a
+ * relative one means nothing to them. The Host header is trusted here because
+ * this is the development harness; behind a real proxy this comes from
+ * configuration, not from the request.
+ */
+function originOf(req: IncomingMessage): string {
+  const host = req.headers.host ?? `localhost:${port}`;
+  const proto = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  return `${proto}://${host}`;
 }
 
 async function sendBlockDetail(res: ServerResponse, id: string): Promise<void> {
