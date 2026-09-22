@@ -15,11 +15,12 @@ decision gets made, write it down here rather than only in a commit.
 Being honest about this matters, because a plan that assumes more than exists
 will schedule the wrong things.
 
-### Built and tested (97 tests)
+### Built and tested (138 tests)
 
 | Area | State |
 |---|---|
-| Schema | `users`, `blocks`, `occupied_tiles`, `featured_slots`, `click_events`, `webhook_events`, `refunds_owed` |
+| Schema | `users`, `blocks`, `occupied_tiles`, `featured_slots`, `click_events`, `webhook_events`, `refunds_owed`, `link_checks`, `block_changes` |
+| Migrations | Numbered, forward-only, applied once each under an advisory lock and recorded in `schema_migrations` |
 | Collision | `occupied_tiles` with `PRIMARY KEY (x, y)`. Overlap is a duplicate key, refused by storage |
 | Claiming | One atomic transaction. Cart is all-or-nothing. Conflicts return 409 with the offending tiles |
 | Reservations | 15 minute hold, released lazily on every claim and by a sweep every minute |
@@ -29,6 +30,9 @@ will schedule the wrong things.
 | Payment plumbing | Webhook idempotency, signature verification over raw bytes, fulfilment with refunds for tiles lost mid-payment, subscription lapse both by webhook and by sweep, `refunds_owed` queue |
 | Review | `approveBlock` / `rejectBlock` exist as functions, with refund on rejection |
 | Featured | Per-purchase windows, 1–10 days, $10 first day then $8. Each runs its own clock |
+| Clicks | Counted through `/go/:id`, once per visitor per day, against a salted hash that changes daily. Daily series and totals for a dashboard |
+| Directory | Category enum, generated search vector with a GIN index, `websearch_to_tsquery` search, paged listing |
+| Scarcity | `orbit_of()` in SQL, swept against `orbitAt()` in a test, so the board can say what is left in each ring |
 | Rendering | Transparent planet sheet, per-planet detail sprites by zoom tier, starfield, nebulae, orbit auras, halos |
 
 ### Not built at all
@@ -40,9 +44,12 @@ will schedule the wrong things.
 - **Admin.** `approveBlock` and `rejectBlock` have no interface.
 - **Dashboard.** No "my planets" screen.
 - **Listing pages.** No `/b/[handle]`, which is the entire SEO surface.
-- **Clicks.** `click_events` exists and **nothing ever writes to it**.
-  `click_count` is never incremented. The stats row reports a number that is
-  structurally always zero.
+- **Link health.** The columns and the `link_checks` table exist; nothing
+  checks a link yet. The job is small and belongs with the other sweeps.
+- **Growing and moving.** `block_changes` records what changed and what it
+  changed the price to; the claim path that performs a grow or a move, and the
+  proration that goes with it, are not written.
+- **Share cards and embeds.** No OG image, no badge.
 - **Rate limiting, CI, monitoring, legal pages, moderation tooling.**
 
 ---

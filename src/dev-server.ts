@@ -12,6 +12,12 @@ import {
   renderPlanet,
 } from "./board/composite.js";
 import { clickSummary, recordClick } from "./board/clicks.js";
+import {
+  categoryCounts,
+  isCategory,
+  orbitAvailability,
+  searchDirectory,
+} from "./board/discovery.js";
 import { ClaimError, TileConflictError } from "./board/errors.js";
 import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
@@ -192,6 +198,27 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (path === "/api/featured") return sendJson(res, 200, await featured(pool));
     if (path === "/api/stats") return sendJson(res, 200, await stats(pool));
     if (path === "/api/board") return sendJson(res, 200, await boardState(pool));
+    if (path === "/api/orbits") return sendJson(res, 200, { orbits: await orbitAvailability(pool) });
+    if (path === "/api/categories") {
+      return sendJson(res, 200, { categories: await categoryCounts(pool) });
+    }
+
+    if (path === "/api/directory") {
+      const category = requestUrl.searchParams.get("category");
+      if (category !== null && !isCategory(category)) {
+        return sendJson(res, 400, { error: "unknown_category", category });
+      }
+      return sendJson(
+        res,
+        200,
+        await searchDirectory(pool, {
+          text: requestUrl.searchParams.get("q") ?? "",
+          ...(category !== null ? { category } : {}),
+          limit: Number(requestUrl.searchParams.get("limit") ?? "40"),
+          offset: Number(requestUrl.searchParams.get("offset") ?? "0"),
+        }),
+      );
+    }
 
     const avatar = /^\/avatars\/([\w.-]+)$/.exec(path);
     if (avatar?.[1] !== undefined) {

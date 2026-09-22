@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import type { Pool } from "pg";
+import { CATEGORIES, type Category } from "./board/discovery.js";
 import { claimBlock } from "./board/claim.js";
 import { avatarPixelsFor, generateAvatar } from "./board/avatar.js";
 import { invalidateCompositeBoard } from "./board/composite.js";
@@ -29,11 +30,6 @@ const LAST = [
   "Stone", "Vega", "Marsh", "Okoye", "Lindqvist", "Reyes", "Sato", "Fenn", "Duarte",
   "Bishop", "Novak", "Rossi", "Adeyemi", "Kaur", "Beaumont", "Halvorsen", "Costa",
   "Yilmaz", "Nakamura", "Ferreira",
-];
-
-const CATEGORIES = [
-  "Fitness", "Music", "Tech", "Art", "Gaming", "Food", "Finance", "Comedy", "Fashion",
-  "Travel", "Film", "Writing",
 ];
 
 const PLATFORMS = ["x", "instagram", "youtube", "tiktok", "twitch", "newsletter"] as const;
@@ -145,7 +141,7 @@ interface Listing {
   readonly name: string;
   readonly handle: string;
   readonly imageUrl: string;
-  readonly category: string;
+  readonly category: Category;
   readonly links: Record<string, string>;
 }
 
@@ -163,7 +159,7 @@ async function publish(pool: Pool, blockId: string, listing: Listing): Promise<v
             handle = $3,
             image_url = $4,
             primary_url = $5,
-            category = $6,
+            category = $6::planet_category,
             links = $7::jsonb,
             click_count = $8
       WHERE id = $1`,
