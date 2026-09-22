@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { BOARD_SIZE, MAX_BLOCK_SIZE } from "../config.js";
+import { BOARD_SIZE, MAX_BLOCK_SIZE, orbitAt } from "../config.js";
 import { createTestUser, hasDatabase, resetBoard, setupTestDatabase } from "../test/db.js";
 
 const suite = describe.skipIf(!hasDatabase);
@@ -31,6 +31,28 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
         `SELECT board_size() AS board, max_block_size() AS max_block`,
       );
       expect(result.rows[0]).toEqual({ board: BOARD_SIZE, max_block: MAX_BLOCK_SIZE });
+    });
+
+    // The orbit radii exist twice for the same reason the board size does: the
+    // scarcity counters are a GROUP BY over occupied_tiles, and SQL cannot call
+    // into src/config.ts to ask which ring a tile is in. Sweeping the board and
+    // comparing both answers is what stops a price change in one from quietly
+    // contradicting the other.
+    it("puts every tile in the same orbit as src/config.ts does", async () => {
+      const result = await pool.query<{ x: number; y: number; orbit: string }>(
+        `SELECT x, y, orbit_of(x::numeric, y::numeric) AS orbit
+           FROM generate_series(0, board_size() - 1, 3) AS x,
+                generate_series(0, board_size() - 1, 3) AS y`,
+      );
+
+      expect(result.rows.length).toBeGreaterThan(9_000);
+
+      const disagreements = result.rows.filter((row) => {
+        const expected = orbitAt(row.x, row.y)?.name ?? "void";
+        return row.orbit !== expected;
+      });
+
+      expect(disagreements.slice(0, 5)).toEqual([]);
     });
   });
 
@@ -145,6 +167,50 @@ suite("schema guarantees [requires DATABASE_URL]", () => {
       await expect(publish(pool, second, "CREATOR")).rejects.toMatchObject({
         constraint: "blocks_handle_lower_key",
       });
+    });
+  });
+
+  describe("discovery and health columns", () => {
+    it("refuses a category that is not on the list", async () => {
+      const block = await reserve(pool, alice, 100, 100, 1);
+      await expect(
+        pool.query(`UPDATE blocks SET category = $2 WHERE id = $1`, [block, "crypto-hustle"]),
+      ).rejects.toMatchObject({ code: "22P02" });
+    });
+
+    it("indexes a listing for search as soon as it is written", async () => {
+      const block = await reserve(pool, alice, 100, 100, 1);
+      await publish(pool, block, "spacefarer");
+      await pool.query(`UPDATE blocks SET description = $2 WHERE id = $1`, [
+        block,
+        "Sketching starships every Tuesday",
+      ]);
+
+      const hit = await pool.query(
+        `SELECT 1 FROM blocks
+          WHERE id = $1 AND search @@ websearch_to_tsquery('simple', 'starships')`,
+        [block],
+      );
+      expect(hit.rowCount).toBe(1);
+    });
+
+    it("will not let a link failure count go negative", async () => {
+      const block = await reserve(pool, alice, 100, 100, 1);
+      await expect(
+        pool.query(`UPDATE blocks SET link_failures = -1 WHERE id = $1`, [block]),
+      ).rejects.toMatchObject({ constraint: "blocks_link_failures_non_negative" });
+    });
+
+    it("refuses a recorded change that did not change anything", async () => {
+      const block = await reserve(pool, alice, 100, 100, 1);
+      await expect(
+        pool.query(
+          `INSERT INTO block_changes
+             (block_id, kind, from_x, from_y, from_size, to_x, to_y, to_size, monthly_delta_cents)
+           VALUES ($1, 'grow', 100, 100, 1, 100, 100, 1, 0)`,
+          [block],
+        ),
+      ).rejects.toMatchObject({ constraint: "block_changes_actually_changed" });
     });
   });
 

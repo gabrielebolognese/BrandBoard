@@ -11,6 +11,7 @@ import {
   localAvatarStore,
   renderPlanet,
 } from "./board/composite.js";
+import { clickSummary, recordClick } from "./board/clicks.js";
 import { ClaimError, TileConflictError } from "./board/errors.js";
 import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
@@ -63,6 +64,7 @@ import {
   sizeCapAt,
 } from "./config.js";
 import { createPool } from "./db/client.js";
+import { migrate } from "./db/migrate.js";
 import sharp from "sharp";
 import { seedBoard } from "./seed.js";
 
@@ -74,7 +76,6 @@ import { seedBoard } from "./seed.js";
 
 const PUBLIC_DIR = new URL("../public/", import.meta.url);
 const AVATAR_DIR = new URL("../var/avatars/", import.meta.url);
-const SCHEMA_FILE = new URL("../db/schema.sql", import.meta.url);
 
 const url = process.env["DATABASE_URL"];
 if (url === undefined || url === "") {
@@ -99,7 +100,8 @@ pool.on("error", (error) => {
 const resettable = /test|dev/i.test(databaseName);
 const avatars = localAvatarStore(AVATAR_DIR);
 
-await pool.query(await readFile(SCHEMA_FILE, "utf8"));
+const migrations = await migrate(pool, true);
+if (migrations.applied.length > 0) console.log(`migrated: ${migrations.applied.join(", ")}`);
 const devUserId = await ensureDevUser(pool);
 
 // Seed on an empty board so `npm run dev` always shows something.
@@ -203,6 +205,18 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
     const block = /^\/api\/block\/([0-9a-f-]{36})$/.exec(path);
     if (block?.[1] !== undefined) return sendBlockDetail(res, block[1]);
+
+    // The outbound link. Every click on a planet goes through here so it can be
+    // counted, which is the only reason an owner can see what they are paying
+    // for.
+    const outbound = /^\/go\/([0-9a-f-]{36})$/.exec(path);
+    if (outbound?.[1] !== undefined) return sendOutbound(req, res, outbound[1]);
+
+    const clicks = /^\/api\/block\/([0-9a-f-]{36})\/clicks$/.exec(path);
+    if (clicks?.[1] !== undefined) {
+      const days = Number(requestUrl.searchParams.get("days") ?? "30");
+      return sendJson(res, 200, await clickSummary(pool, clicks[1], days));
+    }
 
     const session = /^\/api\/checkout\/(chk_[0-9a-f-]{36})$/.exec(path);
     if (session?.[1] !== undefined) {
@@ -992,6 +1006,42 @@ async function sendFile(res: ServerResponse, file: URL): Promise<void> {
   } catch {
     sendJson(res, 404, { error: "not_found", file: basename(file.pathname) });
   }
+}
+
+/**
+ * Follows a planet's link, counting the visit on the way.
+ *
+ * A dead or unpaid planet gets the board rather than an error page: these links
+ * are public, they end up in bios and posts, and they outlive the planet they
+ * pointed at.
+ *
+ * 302 rather than 301 so that nothing caches a destination the owner can change
+ * from their dashboard tomorrow, and noreferrer so the destination does not
+ * receive the visitor's previous page.
+ */
+async function sendOutbound(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+  const { url: destination } = await recordClick(pool, id, clientIp(req));
+
+  res.writeHead(302, {
+    Location: destination ?? "/",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+  });
+  res.end();
+}
+
+/**
+ * Who to count as one visitor.
+ *
+ * Behind a proxy the socket address is the proxy, so the forwarded header is
+ * read first and only its first entry is trusted: the rest is whatever the
+ * client chose to send. It is never stored, only hashed.
+ */
+function clientIp(req: IncomingMessage): string {
+  const forwarded = req.headers["x-forwarded-for"];
+  const header = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  const first = header?.split(",")[0]?.trim();
+  return first !== undefined && first !== "" ? first : (req.socket.remoteAddress ?? "unknown");
 }
 
 function sendJson(

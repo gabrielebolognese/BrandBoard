@@ -1,18 +1,20 @@
-import { readFile } from "node:fs/promises";
-import { createPool } from "./client.js";
+import { createPool, migrationUrl } from "./client.js";
+import { appliedMigrations, migrate } from "./migrate.js";
 
-/** Applies db/schema.sql to DATABASE_URL. Idempotent: safe to re-run. */
+/** Brings DATABASE_URL up to date. Safe to re-run: applied files are skipped. */
 async function main(): Promise<void> {
-  const url = process.env["DATABASE_URL"];
-  if (url === undefined || url === "") {
-    throw new Error("DATABASE_URL is not set. See .env.example.");
-  }
+  const url = migrationUrl();
+  const pool = createPool(url, { max: 1, statementTimeoutMs: 120_000 });
 
-  const schema = await readFile(new URL("../../db/schema.sql", import.meta.url), "utf8");
-  const pool = createPool(url);
   try {
-    await pool.query(schema);
-    console.log(`Applied db/schema.sql to ${new URL(url).pathname.replace(/^\//, "")}`);
+    const { applied, alreadyApplied } = await migrate(pool, true);
+    const name = new URL(url).pathname.replace(/^\//, "");
+
+    if (applied.length === 0) {
+      console.log(`${name} is up to date (${alreadyApplied} migrations applied).`);
+    } else {
+      console.log(`${name}: applied ${applied.length}, now at ${(await appliedMigrations(pool)).length}.`);
+    }
   } finally {
     await pool.end();
   }

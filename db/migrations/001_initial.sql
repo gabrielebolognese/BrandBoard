@@ -1,3 +1,14 @@
+-- 001: the schema as it stood when migrations were introduced.
+--
+-- Taken verbatim from the old db/schema.sql, which was re-applied on every boot
+-- and so was written to be idempotent. That is why this file is full of
+-- IF NOT EXISTS and exception handlers, and why later migrations are not: from
+-- here on, each file runs exactly once against each database.
+--
+-- Every database that existed when this was written was a throwaway, so there
+-- is no history to preserve behind it. A local database from before this point
+-- should be dropped rather than migrated.
+
 -- FlashBrand schema. Requires PostgreSQL 13+ (built-in gen_random_uuid).
 --
 -- The board dimension lives in exactly two places: BOARD_SIZE in src/config.ts
@@ -12,7 +23,6 @@
 -- Changing board_size() does NOT revalidate existing CHECK constraints.
 -- Resizing the board is a migration, not an edit to this file.
 
-BEGIN;
 
 -- ---------------------------------------------------------------------------
 -- Dimensions
@@ -439,5 +449,3 @@ CREATE INDEX IF NOT EXISTS blocks_subscription_idx
 -- Drives the lapse sweep: live blocks whose paid period has ended.
 CREATE INDEX IF NOT EXISTS blocks_period_end_idx
   ON blocks (current_period_end) WHERE status = 'live';
-
-COMMIT;

@@ -24,7 +24,7 @@ listing pages are not built yet.
 | `npm run test:db` | boots a throwaway PostgreSQL and runs the whole suite against it |
 | `npm run test:watch` | vitest in watch mode |
 | `npm run db:up` / `db:down` | local PostgreSQL via docker compose (port 5433) |
-| `npm run db:setup` | apply `db/schema.sql` to `DATABASE_URL` |
+| `npm run db:setup` | apply any pending `db/migrations/*.sql` to `DATABASE_URL` |
 
 Single test file: `npm test -- src/index.test.ts`
 Single test by name: `npm test -- -t "runs without throwing"`
@@ -62,9 +62,24 @@ never retry or relocate.
 Tiles are inserted in a fixed `(x, y)` order so competing transactions contend
 on the same key first and cannot deadlock.
 
-`BOARD_SIZE` lives in `src/config.ts`, mirrored by `board_size()` in
-`db/schema.sql` for constraints the database enforces alone.
-`src/db/schema.test.ts` asserts the two agree. Nothing else may hardcode 100.
+`BOARD_SIZE` lives in `src/config.ts`, mirrored by `board_size()` in the
+migrations for constraints the database enforces alone. The orbit radii are
+duplicated the same way, in `orbit_of()`. `src/db/schema.test.ts` asserts both
+pairs agree -- it sweeps the board and compares every tile's orbit against
+`orbitAt()`. Nothing else may hardcode a board size or a radius.
+
+## Migrations
+
+`db/migrations/NNN_name.sql`, applied in filename order by `src/db/migrate.ts`
+and recorded in `schema_migrations`. Each file runs exactly once, inside its own
+transaction, under an advisory lock so two booting servers cannot both apply it.
+The dev server, `db:setup` and the test harness all call `migrate()`; there is no
+longer a schema file that gets re-applied on boot.
+
+Write forward-only migrations: add a new numbered file rather than editing an
+applied one, because an edit to an applied file is silently skipped on every
+database that already has it. `001_initial.sql` is the old `db/schema.sql`
+verbatim, which is why it is full of `IF NOT EXISTS` and later files are not.
 
 The database-backed tests need a real PostgreSQL and say so by skipping when
 `DATABASE_URL` is unset -- there is no mock, because a mock that accepted both

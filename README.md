@@ -28,7 +28,7 @@ at <http://localhost:4310> and walking up if the port is busy.
 | `npm run test:db` | Throwaway PostgreSQL, then the whole suite against it |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run db:up` / `db:down` | Local PostgreSQL via docker compose, port 5433 |
-| `npm run db:setup` | Apply `db/schema.sql` to `DATABASE_URL` |
+| `npm run db:setup` | Apply pending migrations to `DATABASE_URL` |
 
 ## How the board works
 
@@ -62,7 +62,7 @@ against (x, y, size), with no per-block event listeners.
 ## Layout
 
 ```
-db/schema.sql        schema, constraints, and the collision table
+db/migrations/       numbered, forward-only; 001 is the whole original schema
 src/config.ts        board dimensions and tile geometry, the single source
 src/board/claim.ts   the claim transaction
 src/board/cleanup.ts reservation expiry, lazy and scheduled

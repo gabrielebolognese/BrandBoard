@@ -53,7 +53,7 @@ export function createFeaturedColumn({ listEl, buyEl, geometry, liveBlocks, onPu
       cell.type = "button";
       cell.title = `${block.name} @${block.handle}`;
       cell.addEventListener("click", () => {
-        window.open(block.url, "_blank", "noopener,noreferrer");
+        window.open(`/go/${block.id}`, "_blank", "noopener,noreferrer");
       });
 
       const label = document.createElement("span");

@@ -2,7 +2,7 @@
  * Single source of truth for board dimensions.
  *
  * Nothing else in the codebase may hardcode 100. The SQL side mirrors these as
- * board_size() / max_block_size() in db/schema.sql; src/config.test.ts asserts
+ * board_size() / max_block_size() in db/migrations; src/config.test.ts asserts
  * the two agree against a live database.
  */
 export const BOARD_SIZE = 300;

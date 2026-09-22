@@ -995,7 +995,9 @@ canvas.addEventListener("pointerup", (event) => {
     panning = null;
     canvas.classList.remove("panning");
     if (moved <= 6 && hoverBlock >= 0) {
-      window.open(blocks[hoverBlock].url, "_blank", "noopener,noreferrer");
+      // Through /go so the owner can see the click. The destination is still
+      // on the hover card, so nobody is following a link they cannot read.
+      window.open(`/go/${blocks[hoverBlock].id}`, "_blank", "noopener,noreferrer");
     }
     return;
   }

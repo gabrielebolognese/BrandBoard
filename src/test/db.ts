@@ -1,8 +1,6 @@
-import { readFile } from "node:fs/promises";
 import type { Pool } from "pg";
 import { createPool } from "../db/client.js";
-
-const SCHEMA_URL = new URL("../../db/schema.sql", import.meta.url);
+import { migrate } from "../db/migrate.js";
 
 export const DATABASE_URL = process.env["DATABASE_URL"] ?? "";
 
@@ -31,25 +29,12 @@ function assertDisposable(url: string): void {
   }
 }
 
-/** Arbitrary constant; only has to be the same for everyone applying the schema. */
-const SCHEMA_LOCK_ID = 0x4642_0001;
-
 export async function setupTestDatabase(): Promise<Pool> {
   assertDisposable(DATABASE_URL);
-  const pool = createPool(DATABASE_URL);
-  const schema = await readFile(SCHEMA_URL, "utf8");
-
-  // Two test files applying the schema at the same moment collide inside the
-  // catalog (CREATE OR REPLACE FUNCTION is not concurrency-safe). Serialise it.
-  const client = await pool.connect();
-  try {
-    await client.query(`SELECT pg_advisory_lock($1)`, [SCHEMA_LOCK_ID]);
-    await client.query(schema);
-  } finally {
-    await client.query(`SELECT pg_advisory_unlock($1)`, [SCHEMA_LOCK_ID]).catch(() => undefined);
-    client.release();
-  }
-
+  const pool = createPool(DATABASE_URL, { statementTimeoutMs: 120_000 });
+  // The migrator takes its own advisory lock, so two test files starting at the
+  // same moment cannot collide in the catalog.
+  await migrate(pool);
   return pool;
 }
 
