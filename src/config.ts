@@ -378,3 +378,26 @@ export function estimatedMonthlyClicks(
     basis: `${dailyVisitors.toLocaleString()} visitors a day, ${orbit?.label ?? "the void"}`,
   };
 }
+
+/**
+ * Link health.
+ *
+ * Every live planet's destination is checked on a rotation. A day is often
+ * enough: a link that died an hour ago is not an emergency, and checking more
+ * often mostly means hammering other people's servers.
+ */
+export const LINK_CHECK_INTERVAL_HOURS = 24;
+
+/** One slow host must not hold up the rotation. */
+export const LINK_CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * How many checks in a row must fail before a link is called dead.
+ *
+ * One timeout is not a dead link. Three days of them is, and by then the owner
+ * has been told twice.
+ */
+export const LINK_DEAD_AFTER_FAILURES = 3;
+
+/** How many planets one sweep checks. Keeps a sweep bounded and polite. */
+export const LINK_CHECK_BATCH = 25;

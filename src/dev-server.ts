@@ -19,6 +19,7 @@ import {
   searchDirectory,
 } from "./board/discovery.js";
 import { ClaimError, TileConflictError } from "./board/errors.js";
+import { deadLinks, runLinkCheckSweep } from "./board/links.js";
 import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
 import { createCheckout, readCheckout } from "./board/checkout.js";
@@ -145,6 +146,20 @@ const subscriptionSweep = setInterval(() => {
 subscriptionSweep.unref();
 
 /**
+ * Link health, on a slow rotation.
+ *
+ * Hourly rather than daily: each pass takes a small batch of the planets that
+ * are actually due, so the work spreads out instead of arriving all at once,
+ * and a board that has just been seeded works through itself over a day.
+ */
+const linkSweep = setInterval(() => {
+  void runLinkCheckSweep(pool).catch((error: unknown) => {
+    console.error("link sweep failed:", error);
+  });
+}, 60 * 60_000);
+linkSweep.unref();
+
+/**
  * Distinguishes "this request failed" from "the database is gone".
  *
  * The second one used to leave a process holding the port and answering every
@@ -196,6 +211,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (path === "/api/manifest") return sendManifest(req, res);
     if (path === "/api/availability") return sendAvailability(res);
     if (path === "/api/featured") return sendJson(res, 200, await featured(pool));
+    if (path === "/api/links/dead") return sendJson(res, 200, { blocks: await deadLinks(pool) });
     if (path === "/api/stats") return sendJson(res, 200, await stats(pool));
     if (path === "/api/board") return sendJson(res, 200, await boardState(pool));
     if (path === "/api/orbits") return sendJson(res, 200, { orbits: await orbitAvailability(pool) });
@@ -318,6 +334,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const pay = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/pay$/.exec(path);
     if (pay?.[1] !== undefined) return payCheckout(res, pay[1]);
     if (path === "/api/sweep") return sendJson(res, 200, await runReservationSweep(pool));
+    if (path === "/api/sweep/links") return sendJson(res, 200, await runLinkCheckSweep(pool));
     if (path === "/api/reset") {
       if (!resettable) return sendJson(res, 403, { error: "not_a_dev_database", databaseName });
       await pool.query(`TRUNCATE click_events, occupied_tiles, blocks RESTART IDENTITY CASCADE`);
@@ -448,7 +465,8 @@ async function sendPlanet(
 async function sendBlockDetail(res: ServerResponse, id: string): Promise<void> {
   const result = await pool.query(
     `SELECT id, x, y, size, display_name AS name, handle, primary_url AS url,
-            image_url, category, links, click_count, published_at
+            image_url, category, description, links, click_count, published_at,
+            link_ok, link_checked_at
        FROM blocks
       WHERE id = $1 AND status = 'live'`,
     [id],
