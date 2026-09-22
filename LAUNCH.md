@@ -15,7 +15,7 @@ decision gets made, write it down here rather than only in a commit.
 Being honest about this matters, because a plan that assumes more than exists
 will schedule the wrong things.
 
-### Built and tested (138 tests)
+### Built and tested (209 tests)
 
 | Area | State |
 |---|---|
@@ -33,6 +33,9 @@ will schedule the wrong things.
 | Clicks | Counted through `/go/:id`, once per visitor per day, against a salted hash that changes daily. Daily series and totals for a dashboard |
 | Directory | Category enum, generated search vector with a GIN index, `websearch_to_tsquery` search, paged listing |
 | Scarcity | `orbit_of()` in SQL, swept against `orbitAt()` in a test, so the board can say what is left in each ring |
+| Link health | Daily rotation under SKIP LOCKED, redirects followed by hand, every resolved address checked to be public, dead only after three failures in a row |
+| Grow and move | Both are ordinary claims, priced per tile, recorded in `block_changes`, race tested against a concurrent claim |
+| Sharing | `/b/handle` with OG tags, a 1200x630 card seeded from the planet id, an SVG badge and a copyable embed snippet |
 | Rendering | Transparent planet sheet, per-planet detail sprites by zoom tier, starfield, nebulae, orbit auras, halos |
 
 ### Not built at all
@@ -44,12 +47,10 @@ will schedule the wrong things.
 - **Admin.** `approveBlock` and `rejectBlock` have no interface.
 - **Dashboard.** No "my planets" screen.
 - **Listing pages.** No `/b/[handle]`, which is the entire SEO surface.
-- **Link health.** The columns and the `link_checks` table exist; nothing
-  checks a link yet. The job is small and belongs with the other sweeps.
-- **Growing and moving.** `block_changes` records what changed and what it
-  changed the price to; the claim path that performs a grow or a move, and the
-  proration that goes with it, are not written.
-- **Share cards and embeds.** No OG image, no badge.
+- **Proration.** A grow records the monthly difference; nobody charges it yet.
+  That is the provider's job and waits on P4.
+- **Telling an owner their link died.** `deadLinks()` lists them and the card
+  shows a warning; there is no email, because there is no account to send it to.
 - **Rate limiting, CI, monitoring, legal pages, moderation tooling.**
 
 ---

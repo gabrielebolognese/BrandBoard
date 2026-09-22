@@ -4,13 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-FlashBrand: a public directory of personal brands laid out as a purchasable
-100x100 pixel grid. Creators buy N x N blocks (N = 1..5), drop in an avatar and
-links; visitors browse and click through.
+BrandSpace: a public directory of personal brands laid out as a universe. A
+300x300 tile board holds a disc of radius 150, divided into three priced orbits;
+creators rent an N x N square, drop in an avatar and a link, and visitors browse
+and click through. The product name in the UI is still FlashBrand in places; the
+rename is P0 in LAUNCH.md.
 
-Build order is deliberate and step 1 is done: schema, the claim transaction, and
-the concurrency tests. Board rendering, checkout, review queue, dashboard and
-listing pages are not built yet.
+Built and tested: the schema and its migrations, the claim transaction and its
+concurrency tests, canvas rendering with level-of-detail sprites, the cart and
+checkout with server-side pricing, the payment plumbing (webhook idempotency,
+signature verification, fulfilment, refunds, lapse sweeps), featured slots,
+click recording, the directory with search and categories, scarcity counters,
+link health checks, growing and moving a planet, and share cards, badges and
+per-planet listing pages.
+
+Not built: accounts (everything runs as one hardcoded dev user), the Polar
+checkout call itself (`/pay` answers 503), the review queue interface, a
+dashboard, and a real web framework -- `src/dev-server.ts` is a `node:http`
+harness, not a product server. LAUNCH.md is the plan and the honest inventory.
 
 ## Commands
 
@@ -84,6 +95,18 @@ verbatim, which is why it is full of `IF NOT EXISTS` and later files are not.
 The database-backed tests need a real PostgreSQL and say so by skipping when
 `DATABASE_URL` is unset -- there is no mock, because a mock that accepted both
 writers would pass while the product was broken.
+
+## Two rules the client is held to
+
+`src/client.test.ts` boots the real `public/app.js` against a stubbed DOM,
+because the typechecker does not look at `public/` and `node --check` only
+parses. It exists because a page that rendered nothing passed every other check.
+An unhandled rejection during boot fails it, so a new panel that reads a field
+the stub does not have is caught there rather than in a browser.
+
+`src/site.test.ts` asserts the `[hidden]` guard still precedes any rule that
+sets `display`, that nothing outside `http.js` parses a response body, and that
+no `getElementById` names an id the markup does not contain.
 
 ## Import-time side effects
 
