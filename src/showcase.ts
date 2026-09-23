@@ -233,8 +233,8 @@ async function spreadAuras(pool: Pool): Promise<number> {
 
   const result = await pool.query(
     `UPDATE blocks
-        SET aura = $1::text[][ (abs(hashtext(id::text)) % $2::int) + 1 ]
-      WHERE status = 'live' AND handle NOT IN (SELECT unnest($3::text[]))`,
+        SET aura = ($1::text[])[(abs(hashtext(id::text)) % $2::int) + 1]
+      WHERE status = 'live' AND handle <> ALL ($3::text[])`,
     [names, names.length, ANCHORS.map((anchor) => anchor.handle)],
   );
   return result.rowCount ?? 0;
@@ -244,7 +244,7 @@ async function spreadAuras(pool: Pool): Promise<number> {
 async function addDescriptions(pool: Pool): Promise<void> {
   await pool.query(
     `UPDATE blocks
-        SET description = $1::text[][ (abs(hashtext(handle)) % $2::int) + 1 ]
+        SET description = ($1::text[])[(abs(hashtext(handle)) % $2::int) + 1]
       WHERE status = 'live' AND description IS NULL`,
     [BLURBS, BLURBS.length],
   );
@@ -279,7 +279,7 @@ async function breakAFewLinks(pool: Pool): Promise<void> {
         SET link_ok = false, link_failures = 3, link_checked_at = now() - interval '2 hours'
       WHERE id IN (
         SELECT id FROM blocks
-         WHERE status = 'live' AND handle NOT IN (SELECT unnest($1::text[]))
+         WHERE status = 'live' AND handle <> ALL ($1::text[])
          ORDER BY hashtext(id::text)
          LIMIT 3
       )`,
