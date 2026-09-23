@@ -11,7 +11,7 @@ import {
   localAvatarStore,
   renderPlanet,
 } from "./board/composite.js";
-import { clickSummary, recordClick } from "./board/clicks.js";
+import { clickSummary, hashVisitor, recordClick } from "./board/clicks.js";
 import {
   categoryCounts,
   isCategory,
@@ -32,7 +32,7 @@ import {
 } from "./board/share.js";
 import { isInUniverse, isValidSize } from "./board/geometry.js";
 import type { Placement } from "./board/geometry.js";
-import { createCheckout, readCheckout } from "./board/checkout.js";
+import { checkoutOwner, createCheckout, readCheckout } from "./board/checkout.js";
 import { lapseSubscription, releaseLapsedSubscriptions } from "./board/lifecycle.js";
 import {
   ListingRejected,
@@ -86,6 +86,25 @@ import {
   orderTotals,
   sizeCapAt,
 } from "./config.js";
+import {
+  SESSION_COOKIE,
+  clearedCookie,
+  endAllSessions,
+  endSession,
+  readCookie,
+  sessionCookie,
+  sweepSessions,
+  userForToken,
+} from "./auth/sessions.js";
+import type { SessionUser } from "./auth/sessions.js";
+import {
+  SignInRefused,
+  consoleMailer,
+  consumeSignInLink,
+  requestSignInLink,
+  signInEmail,
+  sweepSignInLinks,
+} from "./auth/magiclink.js";
 import { createPool } from "./db/client.js";
 import { migrate } from "./db/migrate.js";
 import sharp from "sharp";
@@ -96,6 +115,9 @@ import { seedBoard } from "./seed.js";
  * at before a frontend framework is chosen; the routing here is throwaway, but
  * everything it calls into (manifest, composite, claim) is not.
  */
+
+/** The seeded planets belong to this account, and it can sign in like anyone. */
+const DEV_EMAIL = "dev@brandspace.local";
 
 const PUBLIC_DIR = new URL("../public/", import.meta.url);
 const AVATAR_DIR = new URL("../var/avatars/", import.meta.url);
@@ -176,6 +198,19 @@ const linkSweep = setInterval(() => {
 linkSweep.unref();
 
 /**
+ * Expired sessions and spent sign-in links.
+ *
+ * Both are dead weight, and both are a record of who signed in and when, which
+ * is worth not keeping longer than it is useful.
+ */
+const authSweep = setInterval(() => {
+  void Promise.all([sweepSessions(pool), sweepSignInLinks(pool)]).catch((error: unknown) => {
+    console.error("auth sweep failed:", error);
+  });
+}, 60 * 60_000);
+authSweep.unref();
+
+/**
  * Distinguishes "this request failed" from "the database is gone".
  *
  * The second one used to leave a process holding the port and answering every
@@ -197,6 +232,37 @@ function isConnectionFailure(error: unknown): boolean {
   );
 }
 
+/**
+ * Who is making this request.
+ *
+ * Resolved once per request and passed down, rather than looked up wherever it
+ * happens to be needed: a second lookup is a second chance to forget one.
+ */
+async function currentUser(req: IncomingMessage): Promise<SessionUser | null> {
+  return userForToken(pool, readCookie(req.headers.cookie, SESSION_COOKIE));
+}
+
+/**
+ * Whether to mark the session cookie Secure.
+ *
+ * A Secure cookie is dropped outright by the browser over plain http, and
+ * development is plain http, so this follows the connection rather than a
+ * constant. Behind a proxy the forwarded header is what knows.
+ */
+function isSecureRequest(req: IncomingMessage): boolean {
+  if (req.headers["x-forwarded-proto"] === "https") return true;
+  const socket = req.socket as { encrypted?: boolean };
+  return socket.encrypted === true;
+}
+
+/** The 401 body every signed-out mutation gets. */
+function signedOut(res: ServerResponse): void {
+  sendJson(res, 401, {
+    error: "not_signed_in",
+    message: "Sign in first. Everything on the board belongs to somebody.",
+  });
+}
+
 const server = createServer((req, res) => {
   void handle(req, res).catch((error: unknown) => {
     console.error(error);
@@ -210,7 +276,28 @@ const server = createServer((req, res) => {
 
 const port = await listenOnFreePort(server, Number(process.env["PORT"] ?? 4310));
 console.log(`\n  FlashBrand  ->  http://localhost:${port}\n`);
-console.log(`  database ${databaseName}   board ${BOARD_SIZE}x${BOARD_SIZE}   dev user ${devUserId}\n`);
+console.log(`  database ${databaseName}   board ${BOARD_SIZE}x${BOARD_SIZE}   dev user ${devUserId}`);
+
+/**
+ * A way in, on a development database.
+ *
+ * Not a back door: this mints an ordinary sign-in link through the ordinary
+ * code path, so it expires in fifteen minutes and works exactly once, like
+ * every other one. It is printed because on a local machine the log is the
+ * inbox.
+ */
+if (resettable) {
+  const devLink = await requestSignInLink(pool, DEV_EMAIL).catch(() => null);
+  if (devLink !== null) {
+    console.log(
+      `
+  sign in as ${DEV_EMAIL}:
+` +
+        `  http://localhost:${port}/api/auth/verify?token=${encodeURIComponent(devLink.token)}`,
+    );
+  }
+}
+console.log("");
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const requestUrl = new URL(req.url ?? "/", `http://localhost:${port}`);
@@ -241,6 +328,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (path === "/api/manifest") return sendManifest(req, res);
     if (path === "/api/availability") return sendAvailability(res);
     if (path === "/api/featured") return sendJson(res, 200, await featured(pool));
+
+    if (path === "/api/auth/me") {
+      const user = await currentUser(req);
+      return sendJson(res, 200, { user });
+    }
+    if (path === "/api/auth/verify") {
+      return verifySignIn(req, res, requestUrl.searchParams.get("token") ?? "");
+    }
     if (path === "/api/links/dead") return sendJson(res, 200, { blocks: await deadLinks(pool) });
     if (path === "/api/stats") return sendJson(res, 200, await stats(pool));
     if (path === "/api/board") return sendJson(res, 200, await boardState(pool));
@@ -349,33 +444,50 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (method === "POST") {
-    if (path === "/api/claim") return claim(req, res);
-    if (path === "/api/checkout") return checkout(req, res);
-    if (path === "/api/featured") return buyFeatured(req, res);
+    // Everything above the session lookup is reachable signed out, and each one
+    // has its own reason: signing in cannot require being signed in, and the
+    // webhook is authenticated by its signature rather than by a cookie.
+    if (path === "/api/auth/request") return requestSignIn(req, res);
+    if (path === "/api/auth/signout") return signOut(req, res, false);
+    if (path === "/api/auth/signout-all") return signOut(req, res, true);
     if (path === "/api/webhooks/polar") return polarWebhook(req, res);
 
+    // The sweeps are idempotent maintenance with nothing personal in them, and
+    // they are reachable over HTTP so a cron can run them without an account.
+    if (path === "/api/sweep") return sendJson(res, 200, await runReservationSweep(pool));
+    if (path === "/api/sweep/links") return sendJson(res, 200, await runLinkCheckSweep(pool));
+    if (path === "/api/sweep/subscriptions") {
+      return sendJson(res, 200, await releaseLapsedSubscriptions(pool));
+    }
+
+    // One lookup, one guard. Every route below this line acts on somebody's
+    // behalf, so the check lives here rather than in each handler, where it
+    // would be one more thing to remember when adding the next one.
+    const user = await currentUser(req);
+    if (user === null) return signedOut(res);
+
+    if (path === "/api/claim") return claim(req, res, user);
+    if (path === "/api/checkout") return checkout(req, res, user);
+    if (path === "/api/featured") return buyFeatured(req, res, user);
+
     const upload = /^\/api\/upload\/(chk_[0-9a-f-]{36})$/.exec(path);
-    if (upload?.[1] !== undefined) return uploadAvatar(req, res, upload[1]);
+    if (upload?.[1] !== undefined) return uploadAvatar(req, res, upload[1], user);
 
     const listing = /^\/api\/listing\/(chk_[0-9a-f-]{36})$/.exec(path);
-    if (listing?.[1] !== undefined) return putListing(req, res, listing[1]);
+    if (listing?.[1] !== undefined) return putListing(req, res, listing[1], user);
 
     const change = /^\/api\/block\/([0-9a-f-]{36})\/change$/.exec(path);
-    if (change?.[1] !== undefined) return applyChange(req, res, change[1]);
+    if (change?.[1] !== undefined) return applyChange(req, res, change[1], user);
 
     const changeQuote = /^\/api\/block\/([0-9a-f-]{36})\/change\/quote$/.exec(path);
     if (changeQuote?.[1] !== undefined) return quoteBlockChange(req, res, changeQuote[1]);
 
     const trial = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/trial$/.exec(path);
-    if (trial?.[1] !== undefined) return beginTrial(res, trial[1]);
-    if (path === "/api/sweep/subscriptions") {
-      return sendJson(res, 200, await releaseLapsedSubscriptions(pool));
-    }
+    if (trial?.[1] !== undefined) return beginTrial(res, trial[1], user);
 
     const pay = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/pay$/.exec(path);
-    if (pay?.[1] !== undefined) return payCheckout(req, res, pay[1]);
-    if (path === "/api/sweep") return sendJson(res, 200, await runReservationSweep(pool));
-    if (path === "/api/sweep/links") return sendJson(res, 200, await runLinkCheckSweep(pool));
+    if (pay?.[1] !== undefined) return payCheckout(req, res, pay[1], user);
+
     if (path === "/api/reset") {
       if (!resettable) return sendJson(res, 403, { error: "not_a_dev_database", databaseName });
       await pool.query(`TRUNCATE click_events, occupied_tiles, blocks RESTART IDENTITY CASCADE`);
@@ -385,6 +497,130 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   return sendJson(res, 404, { error: "not_found", route: `${method} ${path}` });
+}
+
+/**
+ * Refuses an order that belongs to somebody else.
+ *
+ * A checkout id travels in URLs and gets pasted into support conversations, so
+ * it is treated as an identifier rather than as a secret. Knowing one is not
+ * permission to act on it.
+ *
+ * 404 rather than 403 for another person's order: whether a given id exists is
+ * not something to confirm to whoever is trying ids.
+ */
+async function ownsCheckout(
+  res: ServerResponse,
+  checkoutId: string,
+  user: SessionUser,
+): Promise<boolean> {
+  const owner = await checkoutOwner(pool, checkoutId);
+  if (owner === user.id) return true;
+
+  sendJson(res, 404, { error: "unknown_checkout", message: "No such order." });
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Signing in
+// ---------------------------------------------------------------------------
+
+const mailer = consoleMailer();
+
+/**
+ * Asks for a sign-in link.
+ *
+ * The answer is the same whether or not the address has an account, because
+ * whether somebody is a customer is not a fact this endpoint gets to tell
+ * anyone who can type an address into it.
+ */
+async function requestSignIn(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let email: string;
+  try {
+    const body = (await readJson(req)) as { email?: unknown };
+    if (typeof body.email !== "string") throw new Error("expected an email address");
+    email = body.email;
+  } catch (error) {
+    return badRequest(res, error);
+  }
+
+  try {
+    const link = await requestSignInLink(pool, email, hashVisitor(clientIp(req)));
+    const message = signInEmail(originOf(req), link.token);
+    await mailer.send(link.email, message.subject, message.body);
+
+    return sendJson(res, 200, {
+      sent: true,
+      message: "If that address can receive mail, a link is on its way.",
+    });
+  } catch (error) {
+    if (error instanceof SignInRefused) {
+      return sendJson(res, error.status, { error: error.code, message: error.message });
+    }
+    throw error;
+  }
+}
+
+/**
+ * Follows a sign-in link.
+ *
+ * A redirect rather than JSON, because this is reached by clicking a link in an
+ * email and what should happen is that the board appears, signed in.
+ */
+async function verifySignIn(
+  req: IncomingMessage,
+  res: ServerResponse,
+  token: string,
+): Promise<void> {
+  try {
+    const signedIn = await consumeSignInLink(pool, token, req.headers["user-agent"]);
+
+    res.writeHead(302, {
+      location: "/?signedin=1",
+      "set-cookie": sessionCookie(signedIn.session.token, { secure: isSecureRequest(req) }),
+      "cache-control": "no-store",
+    });
+    res.end();
+  } catch (error) {
+    if (error instanceof SignInRefused) {
+      res.writeHead(302, {
+        location: `/?signin_error=${encodeURIComponent(error.code)}`,
+        "cache-control": "no-store",
+      });
+      res.end();
+      return;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Signing out, here or everywhere.
+ *
+ * The row is deleted rather than marked, so the cookie is worthless from this
+ * moment whatever the browser does with it afterwards.
+ */
+async function signOut(
+  req: IncomingMessage,
+  res: ServerResponse,
+  everywhere: boolean,
+): Promise<void> {
+  const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+
+  let ended = 0;
+  if (everywhere) {
+    const user = await currentUser(req);
+    if (user !== null) ended = await endAllSessions(pool, user.id);
+  } else {
+    ended = (await endSession(pool, token)) ? 1 : 0;
+  }
+
+  res.writeHead(200, {
+    "content-type": "application/json; charset=utf-8",
+    "set-cookie": clearedCookie({ secure: isSecureRequest(req) }),
+    "cache-control": "no-store",
+  });
+  res.end(JSON.stringify({ signedOut: true, sessionsEnded: ended }));
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +932,11 @@ function quote(x: number, y: number, size: number): unknown {
  * it managed to hold. Returns 409 with the offending tiles if any square in the
  * cart was taken, and nothing is reserved in that case.
  */
-async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function checkout(
+  req: IncomingMessage,
+  res: ServerResponse,
+  user: SessionUser,
+): Promise<void> {
   let placements: Placement[];
   try {
     const body = (await readJson(req)) as { placements?: unknown };
@@ -706,7 +946,7 @@ async function checkout(req: IncomingMessage, res: ServerResponse): Promise<void
   }
 
   try {
-    const session = await createCheckout(pool, devUserId, placements);
+    const session = await createCheckout(pool, user.id, placements);
     // What the order might actually be worth, alongside what it costs. Clearly
     // a projection: nothing has measured a click yet.
     const reach = session.lines.map((line) =>
@@ -749,7 +989,10 @@ async function uploadAvatar(
   req: IncomingMessage,
   res: ServerResponse,
   checkoutId: string,
+  user: SessionUser,
 ): Promise<void> {
+  if (!(await ownsCheckout(res, checkoutId, user))) return;
+
   const blocks = await readCheckout(pool, checkoutId);
   if (blocks.length === 0) return sendJson(res, 404, { error: "unknown_checkout" });
 
@@ -788,7 +1031,10 @@ async function putListing(
   req: IncomingMessage,
   res: ServerResponse,
   checkoutId: string,
+  user: SessionUser,
 ): Promise<void> {
+  if (!(await ownsCheckout(res, checkoutId, user))) return;
+
   let body: Record<string, unknown>;
   try {
     body = await readJson(req);
@@ -815,9 +1061,15 @@ async function putListing(
 }
 
 /** Three days on the board without paying, once per account. */
-async function beginTrial(res: ServerResponse, checkoutId: string): Promise<void> {
+async function beginTrial(
+  res: ServerResponse,
+  checkoutId: string,
+  user: SessionUser,
+): Promise<void> {
+  if (!(await ownsCheckout(res, checkoutId, user))) return;
+
   try {
-    const result = await startTrial(pool, devUserId, checkoutId);
+    const result = await startTrial(pool, user.id, checkoutId);
     invalidateCompositeBoard();
     return sendJson(res, 201, { ...result, trialDays: TRIAL_DAYS });
   } catch (error) {
@@ -1047,7 +1299,10 @@ async function payCheckout(
   req: IncomingMessage,
   res: ServerResponse,
   checkoutId: string,
+  user: SessionUser,
 ): Promise<void> {
+  if (!(await ownsCheckout(res, checkoutId, user))) return;
+
   const blocks = await readCheckout(pool, checkoutId);
 
   if (blocks.length === 0) {
@@ -1092,7 +1347,15 @@ async function payCheckout(
       productId: polar.config.subscriptionProductId,
       amountCents: totals.termTotalCents,
       successUrl: `${originOf(req)}/?paid=${encodeURIComponent(checkoutId)}`,
-      metadata: { kind: "subscription", checkout_id: checkoutId, blocks: blocks.length },
+      metadata: {
+        kind: "subscription",
+        checkout_id: checkoutId,
+        blocks: blocks.length,
+        user_id: user.id,
+      },
+      // Polar needs somebody to bill and somebody to send a receipt to. Until
+      // there were accounts there was nobody, which is what held this up.
+      ...(user.email !== null ? { customerEmail: user.email } : {}),
     });
 
     return sendJson(res, 200, {
@@ -1119,7 +1382,11 @@ async function payCheckout(
 }
 
 /** Buys a featured window for a block. The clock starts now, not at midnight. */
-async function buyFeatured(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function buyFeatured(
+  req: IncomingMessage,
+  res: ServerResponse,
+  user: SessionUser,
+): Promise<void> {
   let blockId: string;
   let days: number;
   try {
@@ -1148,19 +1415,23 @@ async function buyFeatured(req: IncomingMessage, res: ServerResponse): Promise<v
     // Checked before taking money, so nobody pays for a slot that could never
     // be shown. featureBlock checks it again when the webhook lands, because by
     // then the block may have gone.
-    const target = await pool.query<{ status: string }>(
-      `SELECT status FROM blocks WHERE id = $1`,
+    const target = await pool.query<{ status: string; user_id: string }>(
+      `SELECT status, user_id FROM blocks WHERE id = $1`,
       [blockId],
     );
-    const status = target.rows[0]?.status;
-    if (status === undefined) throw new UnknownBlockError(blockId);
-    if (status !== "live") throw new BlockNotLiveError(status);
+    const row = target.rows[0];
+    if (row === undefined) throw new UnknownBlockError(blockId);
+    // Featuring somebody else's planet would be paying to promote a stranger,
+    // which is either a mistake or an attack and is never what was meant.
+    if (row.user_id !== user.id) throw new UnknownBlockError(blockId);
+    if (row.status !== "live") throw new BlockNotLiveError(row.status);
 
     const session = await createPolarCheckout(polar.config, {
       productId: polar.config.featuredProductId,
       amountCents: featuredPriceCents(days),
       successUrl: `${originOf(req)}/?featured=${encodeURIComponent(blockId)}`,
-      metadata: { kind: "featured", block_id: blockId, days },
+      metadata: { kind: "featured", block_id: blockId, days, user_id: user.id },
+      ...(user.email !== null ? { customerEmail: user.email } : {}),
     });
 
     return sendJson(res, 200, {
@@ -1234,6 +1505,7 @@ async function applyChange(
   req: IncomingMessage,
   res: ServerResponse,
   blockId: string,
+  user: SessionUser,
 ): Promise<void> {
   let to: Placement;
   try {
@@ -1243,7 +1515,9 @@ async function applyChange(
   }
 
   try {
-    const applied = await changeBlock(pool, devUserId, blockId, to);
+    // changeBlock does the ownership check itself, inside the transaction
+    // that locks the row, which is the only place it can be relied on.
+    const applied = await changeBlock(pool, user.id, blockId, to);
     invalidateCompositeBoard();
     return sendJson(res, 200, applied);
   } catch (error) {
@@ -1262,7 +1536,11 @@ async function applyChange(
   }
 }
 
-async function claim(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function claim(
+  req: IncomingMessage,
+  res: ServerResponse,
+  user: SessionUser,
+): Promise<void> {
   let placements: Placement[];
   try {
     const body = (await readJson(req)) as { placements?: unknown };
@@ -1272,7 +1550,7 @@ async function claim(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   try {
-    const blocks = await claimBlocks(pool, devUserId, placements);
+    const blocks = await claimBlocks(pool, user.id, placements);
     return sendJson(res, 201, { claimed: blocks });
   } catch (error) {
     if (error instanceof TileConflictError) {
@@ -1495,12 +1773,23 @@ function listenOnFreePort(
   });
 }
 
+/**
+ * The account the seeded planets belong to.
+ *
+ * It has an address now, so it can be signed into through the ordinary sign-in
+ * path rather than through a back door. It is an admin, because the review
+ * queue needs somebody who can approve things.
+ */
 async function ensureDevUser(pool: Pool): Promise<string> {
   const result = await pool.query<{ id: string }>(
-    `INSERT INTO users (x_handle, x_user_id)
-     VALUES ('dev', 'dev-user')
-     ON CONFLICT (x_user_id) DO UPDATE SET x_handle = EXCLUDED.x_handle
+    `INSERT INTO users (x_handle, x_user_id, email, display_name, is_admin)
+     VALUES ('dev', 'dev-user', $1, 'Developer', true)
+     ON CONFLICT (x_user_id) DO UPDATE
+        SET x_handle = EXCLUDED.x_handle,
+            email = coalesce(users.email, EXCLUDED.email),
+            is_admin = true
      RETURNING id`,
+    [DEV_EMAIL],
   );
   const row = result.rows[0];
   if (row === undefined) throw new Error("could not create the dev user");

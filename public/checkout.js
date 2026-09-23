@@ -18,7 +18,7 @@
 import { messageFrom, postBinary, postJson } from "./http.js";
 import { createModal } from "./modal.js";
 
-export function createCheckout({ settings, onChange, onReserved, onConflict }) {
+export function createCheckout({ settings, onChange, onReserved, onConflict, requireUser }) {
   let items = [];
   let session = null;
   let step = "details";
@@ -120,6 +120,13 @@ export function createCheckout({ settings, onChange, onReserved, onConflict }) {
       return;
     }
     if (items.length === 0) return;
+
+    // Asked for before the tiles are reserved rather than at the payment step.
+    // Reserving creates something that belongs to somebody, and a hold made
+    // while signed out belongs to nobody and cannot be handed over afterwards.
+    if (requireUser !== undefined && (await requireUser("Sign in to hold these tiles")) === null) {
+      return;
+    }
 
     launcher.disabled = true;
     const response = await postJson("/api/checkout", { placements: items });
@@ -502,6 +509,12 @@ export function createCheckout({ settings, onChange, onReserved, onConflict }) {
       onConflict?.({ message: messageFrom(response, "The hold expired.") });
       clear();
       await onReserved?.();
+      return;
+    }
+    if (response.status === 401) {
+      payState = { status: "idle" };
+      trigger.disabled = false;
+      await requireUser?.("Sign in to finish this order");
       return;
     }
 

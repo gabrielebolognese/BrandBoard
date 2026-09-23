@@ -1,3 +1,4 @@
+import { readdir } from "node:fs/promises";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appliedMigrations, migrate } from "./migrate.js";
@@ -16,10 +17,17 @@ suite("migrations [requires DATABASE_URL]", () => {
     await pool.end();
   });
 
-  it("records every file it applied", async () => {
+  // Counted from the directory rather than written down here, so adding a
+  // migration does not mean editing a test that was not about the number.
+  it("records every file it applied, in order", async () => {
+    const files = (await readdir(new URL("../../db/migrations/", import.meta.url)))
+      .filter((name) => name.endsWith(".sql"))
+      .sort((a, b) => a.localeCompare(b, "en"));
+
     const applied = await appliedMigrations(pool);
 
-    expect(applied.map((row) => row.version)).toEqual(["001", "002"]);
+    expect(applied.map((row) => row.name)).toEqual(files);
+    expect(applied.map((row) => row.version)).toEqual([...applied.map((row) => row.version)].sort());
     expect(applied[0]?.name).toBe("001_initial.sql");
   });
 
@@ -30,7 +38,7 @@ suite("migrations [requires DATABASE_URL]", () => {
     const result = await migrate(pool);
 
     expect(result.applied).toEqual([]);
-    expect(result.alreadyApplied).toBe(2);
+    expect(result.alreadyApplied).toBe((await appliedMigrations(pool)).length);
   });
 
   // Two servers booting at once both see the same work pending. The advisory
@@ -39,6 +47,7 @@ suite("migrations [requires DATABASE_URL]", () => {
     const runs = await Promise.all([migrate(pool), migrate(pool), migrate(pool)]);
 
     for (const run of runs) expect(run.applied).toEqual([]);
-    expect((await appliedMigrations(pool)).length).toBe(2);
+    const after = await appliedMigrations(pool);
+    expect(new Set(after.map((row) => row.version)).size).toBe(after.length);
   });
 });

@@ -140,3 +140,18 @@ export async function readCheckout(
     reservedUntil: row.reserved_until,
   }));
 }
+
+/**
+ * Who an order belongs to, or null when there is no such order.
+ *
+ * Every endpoint that acts on a checkout id has to ask this first. A checkout
+ * id is a bearer token otherwise: guessable or not, nothing else stops one
+ * person from uploading an avatar onto another person's order.
+ */
+export async function checkoutOwner(pool: Pool, checkoutId: string): Promise<string | null> {
+  const result = await pool.query<{ user_id: string }>(
+    `SELECT user_id FROM blocks WHERE checkout_session_id = $1 LIMIT 1`,
+    [checkoutId],
+  );
+  return result.rows[0]?.user_id ?? null;
+}

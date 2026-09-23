@@ -9,6 +9,7 @@ import { getJson, postJson } from "./http.js";
 import { createFeaturedColumn } from "./featured.js";
 import { createDirectory } from "./directory.js";
 import { createShare } from "./share.js";
+import { createAuth } from "./auth.js";
 
 let BOARD = 300;
 
@@ -1164,6 +1165,13 @@ const featured = createFeaturedColumn({
   },
 });
 
+const auth = createAuth({
+  slotEl: document.getElementById("auth"),
+  onChange: () => {
+    dirty = true;
+  },
+});
+
 const share = createShare();
 
 const directory = createDirectory({
@@ -1175,6 +1183,7 @@ const directory = createDirectory({
 
 const checkout = createCheckout({
   settings: () => ({ auras, trialDays }),
+  requireUser: (reason) => auth.require(reason),
   onChange: () => {
     dirty = true;
   },
@@ -1200,7 +1209,21 @@ void Promise.all([
   loadAvailability(),
   featured.loadPricing(),
   directory.reload(),
+  auth.refresh(),
 ]);
+
+// Whatever the sign-in redirect left behind, said once and then cleared, so a
+// refresh does not repeat it and the address bar does not keep it.
+{
+  const landed = auth.readRedirect(window.location.search);
+  if (landed !== null) {
+    toast(
+      landed.kind === "signedin" ? "Signed in." : landed.message,
+      landed.kind === "signedin" ? "ok" : "bad",
+    );
+    window.history?.replaceState?.({}, "", window.location.pathname);
+  }
+}
 
 // The watching count is server state that drifts once a minute, so poll for it
 // rather than inventing a number per browser.

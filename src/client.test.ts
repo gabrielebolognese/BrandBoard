@@ -111,6 +111,7 @@ function stubFetch(): void {
       ],
     },
     "/api/categories": { categories: [{ category: "music", count: 2 }] },
+    "/api/auth/me": { user: null },
     "/api/directory": {
       total: 2,
       entries: [
@@ -134,6 +135,8 @@ function stubBrowser(): void {
   stubFetch();
   vi.stubGlobal("window", {
     devicePixelRatio: 1,
+    location: { search: "", pathname: "/" },
+    history: { replaceState() {} },
     addEventListener() {},
     setInterval: () => 0,
     clearInterval() {},
