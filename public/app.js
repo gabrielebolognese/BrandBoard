@@ -1131,12 +1131,42 @@ document.querySelector(".dev")?.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "showcase") {
+    const button = event.target;
+    button.disabled = true;
+    const was = button.textContent;
+    button.textContent = "Filling...";
+
+    const { ok, body: filled } = await postJson("/api/showcase");
+
+    button.disabled = false;
+    button.textContent = was;
+
+    if (!ok || filled === null) {
+      toast("The board could not be filled.", "bad");
+      return;
+    }
+
+    checkout.clear();
+    toast(
+      `${filled.blocks} planets across ${filled.tiles} tiles, in every aura.`,
+      "ok",
+    );
+    // The composite is a rendered image of the whole board, so it has to be
+    // refetched rather than redrawn: nothing on the client can derive it.
+    await Promise.all([loadManifest(), loadAvailability(), loadStats(), loadComposite()]);
+    await Promise.all([featured.refresh(), directory.reload()]);
+    dirty = true;
+    return;
+  }
+
   if (action === "reset") {
     await postJson("/api/reset");
     checkout.clear();
-    toast("Board emptied. Restart the server to reseed.", "ok");
+    toast("Board emptied. Press Fill board, or restart the server to reseed.", "ok");
     await Promise.all([loadManifest(), loadAvailability(), loadStats(), loadComposite()]);
-    await featured.refresh();
+    await Promise.all([featured.refresh(), directory.reload()]);
+    dirty = true;
   }
 });
 

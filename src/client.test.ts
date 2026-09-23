@@ -17,16 +17,31 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const CANVAS_OPS: string[] = [];
 
 function stubContext(): unknown {
+  // The calls that have to return something usable. They are recorded too:
+  // an earlier version returned them straight from the target, which meant the
+  // gradients never appeared in CANVAS_OPS and a test could not tell a board
+  // with auras from one without.
+  const answering: Record<string, () => unknown> = {
+    createRadialGradient: () => ({ addColorStop() {} }),
+    createLinearGradient: () => ({ addColorStop() {} }),
+    measureText: () => ({ width: 10 }),
+  };
+
   return new Proxy(
-    {
-      canvas: { width: 1200, height: 700 },
-      createRadialGradient: () => ({ addColorStop() {} }),
-      createLinearGradient: () => ({ addColorStop() {} }),
-      measureText: () => ({ width: 10 }),
-    } as Record<string, unknown>,
+    { canvas: { width: 1200, height: 700 } } as Record<string, unknown>,
     {
       get(target, prop: string) {
         if (prop in target) return target[prop];
+
+        const answer = answering[prop];
+        if (answer !== undefined) {
+          return (...args: unknown[]) => {
+            CANVAS_OPS.push(prop);
+            void args;
+            return answer();
+          };
+        }
+
         return (...args: unknown[]) => {
           CANVAS_OPS.push(prop);
           void args;
@@ -197,5 +212,13 @@ describe("the client", () => {
     expect(CANVAS_OPS).toContain("arc");
     expect(CANVAS_OPS).toContain("drawImage");
     expect(CANVAS_OPS).toContain("fillRect");
+
+    // Named separately because "it drew something" is not the same claim as
+    // "it drew the universe", and the thing people notice missing is the
+    // universe: the orbit rings, their auras, and their labels. Twice now a
+    // page has rendered a background and nothing else and every check passed.
+    expect(CANVAS_OPS).toContain("stroke");
+    expect(CANVAS_OPS).toContain("createRadialGradient");
+    expect(CANVAS_OPS).toContain("fillText");
   }, 20_000);
 });

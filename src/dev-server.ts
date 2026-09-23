@@ -109,6 +109,7 @@ import { createPool } from "./db/client.js";
 import { migrate } from "./db/migrate.js";
 import sharp from "sharp";
 import { seedBoard } from "./seed.js";
+import { fillShowcase } from "./showcase.js";
 
 /**
  * Development harness. It serves the board so the rendering work can be looked
@@ -460,6 +461,21 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return sendJson(res, 200, await releaseLapsedSubscriptions(pool));
     }
 
+    // Both of these truncate, and what protects them is the database being a
+    // disposable one, not a cookie. Requiring a session would add nothing on a
+    // development database and would only make the buttons fail confusingly.
+    if (path === "/api/showcase") {
+      if (!resettable) return sendJson(res, 403, { error: "not_a_dev_database", databaseName });
+      return sendJson(res, 200, await fillShowcase(pool, AVATAR_DIR));
+    }
+
+    if (path === "/api/reset") {
+      if (!resettable) return sendJson(res, 403, { error: "not_a_dev_database", databaseName });
+      await pool.query(`TRUNCATE click_events, occupied_tiles, blocks RESTART IDENTITY CASCADE`);
+      invalidateCompositeBoard();
+      return sendJson(res, 200, { reset: true });
+    }
+
     // One lookup, one guard. Every route below this line acts on somebody's
     // behalf, so the check lives here rather than in each handler, where it
     // would be one more thing to remember when adding the next one.
@@ -488,12 +504,6 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const pay = /^\/api\/checkout\/(chk_[0-9a-f-]{36})\/pay$/.exec(path);
     if (pay?.[1] !== undefined) return payCheckout(req, res, pay[1], user);
 
-    if (path === "/api/reset") {
-      if (!resettable) return sendJson(res, 403, { error: "not_a_dev_database", databaseName });
-      await pool.query(`TRUNCATE click_events, occupied_tiles, blocks RESTART IDENTITY CASCADE`);
-      invalidateCompositeBoard();
-      return sendJson(res, 200, { reset: true });
-    }
   }
 
   return sendJson(res, 404, { error: "not_found", route: `${method} ${path}` });
