@@ -930,7 +930,8 @@ body.modal-open { overflow: hidden; }
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: #0d1424 center / cover no-repeat;
+  background: #0d1424;
+  object-fit: cover;
 }
 
 .dir-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }

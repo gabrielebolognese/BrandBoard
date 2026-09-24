@@ -16,7 +16,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const CANVAS_OPS: string[] = [];
 
-function stubContext(): unknown {
+/**
+ * The same calls, tagged with which canvas they landed on.
+ *
+ * The world is now rendered to an offscreen canvas and blitted, so "something
+ * called arc" no longer means anything appeared on screen. Without the tag a
+ * version that rendered the universe perfectly and forgot to blit it would
+ * pass every assertion below.
+ */
+const TAGGED_OPS: string[] = [];
+
+function stubContext(label: string): unknown {
   // The calls that have to return something usable. They are recorded too:
   // an earlier version returned them straight from the target, which meant the
   // gradients never appeared in CANVAS_OPS and a test could not tell a board
@@ -37,6 +47,7 @@ function stubContext(): unknown {
         if (answer !== undefined) {
           return (...args: unknown[]) => {
             CANVAS_OPS.push(prop);
+            TAGGED_OPS.push(`${label}:${prop}`);
             void args;
             return answer();
           };
@@ -44,6 +55,7 @@ function stubContext(): unknown {
 
         return (...args: unknown[]) => {
           CANVAS_OPS.push(prop);
+          TAGGED_OPS.push(`${label}:${prop}`);
           void args;
         };
       },
@@ -52,7 +64,7 @@ function stubContext(): unknown {
   );
 }
 
-function stubElement(): Record<string, unknown> {
+function stubElement(label = "offscreen"): Record<string, unknown> {
   const element: Record<string, unknown> = {
     style: {},
     dataset: {},
@@ -68,7 +80,7 @@ function stubElement(): Record<string, unknown> {
     offsetParent: {},
     width: 1200,
     height: 700,
-    getContext: () => stubContext(),
+    getContext: () => stubContext(label),
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 1200, height: 700 }),
     addEventListener() {},
     append() {},
@@ -81,7 +93,7 @@ function stubElement(): Record<string, unknown> {
     hasPointerCapture: () => false,
     setPointerCapture() {},
     releasePointerCapture() {},
-    querySelector: () => stubElement(),
+    querySelector: () => stubElement(label),
     querySelectorAll: () => [],
   };
   return element;
@@ -164,7 +176,9 @@ function stubBrowser(): void {
   vi.stubGlobal("document", {
     body: stubElement(),
     createElement: () => stubElement(),
-    getElementById: () => stubElement(),
+    // The board is the visible canvas; everything else the client makes for
+    // itself is offscreen.
+    getElementById: (id: string) => stubElement(id === "board" ? "main" : "offscreen"),
     querySelector: () => stubElement(),
     querySelectorAll: () => [],
     addEventListener() {},
@@ -197,6 +211,7 @@ describe("the client", () => {
 
   it("boots and draws without throwing", async () => {
     CANVAS_OPS.length = 0;
+    TAGGED_OPS.length = 0;
     stubBrowser();
 
     // Already a file:// URL; running it through pathToFileURL again mangles
@@ -220,5 +235,11 @@ describe("the client", () => {
     expect(CANVAS_OPS).toContain("stroke");
     expect(CANVAS_OPS).toContain("createRadialGradient");
     expect(CANVAS_OPS).toContain("fillText");
+
+    // And it reached the screen. The world is rendered offscreen and blitted,
+    // so rendering it and never blitting it would otherwise look identical
+    // from here.
+    expect(TAGGED_OPS).toContain("offscreen:createRadialGradient");
+    expect(TAGGED_OPS).toContain("main:drawImage");
   }, 20_000);
 });

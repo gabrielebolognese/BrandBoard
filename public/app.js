@@ -360,21 +360,76 @@ function buildStars() {
  * composite is transparent now, so these show through wherever there is no
  * planet and carry on past the last orbit.
  */
-function drawStars(rect, seconds) {
-  for (const layer of starLayers) {
-    for (const star of layer.stars) {
-      const sx = originX * layer.depth + star.x * scale;
-      if (sx < -4 || sx > rect.width + 4) continue;
-      const sy = originY * layer.depth + star.y * scale;
-      if (sy < -4 || sy > rect.height + 4) continue;
+/**
+ * The sky.
+ *
+ * Twelve hundred stars used to be twelve hundred fillRects, each preceded by
+ * its own globalAlpha and fillStyle, which is two and a half thousand context
+ * state changes before anything else on the screen had been drawn. Canvas state
+ * changes are the expensive part, not the rectangles.
+ *
+ * So each layer is drawn once into its own bitmap at the current zoom and then
+ * blitted, which is four calls. The twinkle moves to the layer rather than the
+ * star: individual stars no longer wink independently, but at these sizes that
+ * was never what anybody saw. What reads as a night sky is the drifting overall
+ * brightness, and that survives.
+ */
+const starBitmaps = new Map();
 
-      const twinkle = 0.62 + 0.38 * Math.sin(seconds * star.speed + star.phase);
-      ctx.globalAlpha = Math.min(1, star.alpha * twinkle);
-      ctx.fillStyle = star.warm ? "#ffe6c8" : "#dce9ff";
-      ctx.fillRect(sx, sy, star.size, star.size);
+function starBitmapFor(layer, index) {
+  const key = `${index}:${scale.toFixed(3)}`;
+  const existing = starBitmaps.get(key);
+  if (existing !== undefined) return existing;
+
+  // Bounded in device pixels: at a deep zoom the field would otherwise be
+  // larger than any texture the browser will allocate.
+  const span = Math.min(8192, Math.max(1, Math.round(PX * scale)));
+  const bitmap = document.createElement("canvas");
+  bitmap.width = span;
+  bitmap.height = span;
+
+  const bc = bitmap.getContext("2d");
+  let warm = false;
+  bc.fillStyle = "#dce9ff";
+
+  // Sorted by colour so the fill style is set twice rather than once per star.
+  const ordered = [...layer.stars].sort((a, b) => Number(a.warm) - Number(b.warm));
+  for (const star of ordered) {
+    if (star.warm !== warm) {
+      warm = star.warm;
+      bc.fillStyle = warm ? "#ffe6c8" : "#dce9ff";
     }
+    const sx = star.x * scale;
+    const sy = star.y * scale;
+    if (sx < 0 || sy < 0 || sx > span || sy > span) continue;
+    bc.globalAlpha = star.alpha;
+    bc.fillRect(sx, sy, star.size, star.size);
   }
-  ctx.globalAlpha = 1;
+
+  // One zoom level's worth is all that is ever wanted at once.
+  if (starBitmaps.size > 8) {
+    const oldest = starBitmaps.keys().next().value;
+    if (oldest !== undefined) starBitmaps.delete(oldest);
+  }
+  starBitmaps.set(key, bitmap);
+  return bitmap;
+}
+
+function drawStars(c, rect, seconds) {
+  for (let i = 0; i < starLayers.length; i += 1) {
+    const layer = starLayers[i];
+    if (layer.stars.length === 0) continue;
+
+    const bitmap = starBitmapFor(layer, i);
+    const x = originX * layer.depth;
+    const y = originY * layer.depth;
+    if (x > rect.width || y > rect.height) continue;
+    if (x + bitmap.width < 0 || y + bitmap.height < 0) continue;
+
+    c.globalAlpha = 0.72 + 0.28 * Math.sin(seconds * 0.5 + i * 1.1);
+    c.drawImage(bitmap, x, y);
+  }
+  c.globalAlpha = 1;
 }
 
 /**
@@ -420,11 +475,11 @@ function buildNebulae() {
 const NEBULA_DEPTH = 0.12;
 const NEBULA_SPAN = 3.4;
 
-function drawNebulae() {
+function drawNebulae(c) {
   if (nebulaLayer === null) return;
   const span = PX * NEBULA_SPAN * scale;
   const offset = -PX * ((NEBULA_SPAN - 1) / 2) * scale;
-  ctx.drawImage(
+  c.drawImage(
     nebulaLayer,
     originX * NEBULA_DEPTH + offset,
     originY * NEBULA_DEPTH + offset,
@@ -543,7 +598,7 @@ function spriteFor(block, tier) {
  * Exactly the same rect as the sheet drew, so a sprite arriving mid-pan swaps
  * in without anything moving.
  */
-function drawPlanetDetail(rect) {
+function drawPlanetDetail(c, rect) {
   if (blocks.length === 0) return;
 
   // Biggest first: if the in-flight budget runs out, spend it where it shows.
@@ -560,12 +615,12 @@ function drawPlanetDetail(rect) {
 
   for (const { block, r, tier } of candidates) {
     const sprite = spriteFor(block, tier);
-    if (sprite !== null) ctx.drawImage(sprite, r.x, r.y, r.side, r.side);
+    if (sprite !== null) c.drawImage(sprite, r.x, r.y, r.side, r.side);
   }
 }
 
 /** Drawn under the planet sheet, so every world sits in its own glow. */
-function drawHalos(rect, seconds) {
+function drawHalos(c, rect, seconds) {
   for (let i = 0; i < blocks.length; i += 1) {
     const block = blocks[i];
     const r = rectFor(block);
@@ -576,10 +631,10 @@ function drawHalos(rect, seconds) {
 
     // Each one on its own phase, so the field shimmers rather than pulsing
     // in unison like a warning light.
-    ctx.globalAlpha = 0.72 + 0.28 * Math.sin(seconds * 0.6 + i * 1.7);
-    ctx.drawImage(haloFor(block.aura ?? "azure"), x, y, span, span);
+    c.globalAlpha = 0.72 + 0.28 * Math.sin(seconds * 0.6 + i * 1.7);
+    c.drawImage(haloFor(block.aura ?? "azure"), x, y, span, span);
   }
-  ctx.globalAlpha = 1;
+  c.globalAlpha = 1;
 }
 
 /** Screen rect of a square's footprint, matching the composite's insets. */
@@ -641,7 +696,7 @@ const ORBIT_AURA = [
  * low in alpha, since it has to be readable behind a starfield without
  * competing with it.
  */
-function drawAuras(seconds) {
+function drawAuras(c, seconds) {
   const cx = originX + boardCenter * TILE * scale;
   const cy = originY + boardCenter * TILE * scale;
 
@@ -656,24 +711,24 @@ function drawAuras(seconds) {
     const breath = 0.86 + 0.14 * Math.sin(seconds * 0.4 + i * 1.3);
     const peak = aura.peak * breath;
 
-    const gradient = ctx.createRadialGradient(cx, cy, Math.max(0, inner), cx, cy, outer);
+    const gradient = c.createRadialGradient(cx, cy, Math.max(0, inner), cx, cy, outer);
     gradient.addColorStop(0, `rgba(${aura.rgb}, 0)`);
     gradient.addColorStop(0.55, `rgba(${aura.rgb}, ${(peak * 0.28).toFixed(4)})`);
     gradient.addColorStop(0.92, `rgba(${aura.rgb}, ${peak.toFixed(4)})`);
     gradient.addColorStop(1, `rgba(${aura.rgb}, 0)`);
 
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(cx, cy, outer, 0, Math.PI * 2);
-    ctx.fill();
+    c.fillStyle = gradient;
+    c.beginPath();
+    c.arc(cx, cy, outer, 0, Math.PI * 2);
+    c.fill();
   }
 }
 
-function drawOrbits(rect, seconds) {
+function drawOrbits(c, rect, seconds) {
   const cx = originX + boardCenter * TILE * scale;
   const cy = originY + boardCenter * TILE * scale;
 
-  ctx.save();
+  c.save();
   for (let i = 0; i < orbits.length; i += 1) {
     const orbit = orbits[i];
     const radius = orbit.outerRadius * TILE * scale;
@@ -682,25 +737,25 @@ function drawOrbits(rect, seconds) {
     // The ring itself in its own colour, a shade brighter than its aura.
     const aura = ORBIT_AURA[i] ?? ORBIT_AURA[ORBIT_AURA.length - 1];
     const drift = 0.5 + 0.5 * Math.sin(seconds * 0.35 + i);
-    ctx.strokeStyle = `rgba(${aura.rgb}, ${(0.3 + 0.16 * drift).toFixed(3)})`;
-    ctx.lineWidth = i === orbits.length - 1 ? 1.5 : 1;
-    ctx.setLineDash(i === orbits.length - 1 ? [] : [6, 8]);
-    ctx.lineDashOffset = seconds * (i % 2 === 0 ? -6 : 6);
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.stroke();
+    c.strokeStyle = `rgba(${aura.rgb}, ${(0.3 + 0.16 * drift).toFixed(3)})`;
+    c.lineWidth = i === orbits.length - 1 ? 1.5 : 1;
+    c.setLineDash(i === orbits.length - 1 ? [] : [6, 8]);
+    c.lineDashOffset = seconds * (i % 2 === 0 ? -6 : 6);
+    c.beginPath();
+    c.arc(cx, cy, radius, 0, Math.PI * 2);
+    c.stroke();
 
     // The rate, written on the ring where there is room for it.
     if (radius > 60 && radius < Math.max(rect.width, rect.height) * 1.6) {
-      ctx.setLineDash([]);
-      ctx.fillStyle = `rgba(${aura.rgb}, 0.62)`;
-      ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
-      ctx.textAlign = "center";
+      c.setLineDash([]);
+      c.fillStyle = `rgba(${aura.rgb}, 0.62)`;
+      c.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+      c.textAlign = "center";
       const label = `${orbit.label} · $${(orbit.centsPerTilePerMonth / 100).toFixed(0)}/tile`;
-      ctx.fillText(label, cx, cy - radius - 7);
+      c.fillText(label, cx, cy - radius - 7);
     }
   }
-  ctx.restore();
+  c.restore();
 }
 
 /**
@@ -710,14 +765,14 @@ function drawOrbits(rect, seconds) {
  * someone choosing where their planet goes needs to see the squares they are
  * choosing between. So it appears for the drag and then gets out of the way.
  */
-function drawPlacementGrid(rect) {
+function drawPlacementGrid(c, rect) {
   const step = TILE * scale;
   if (step < 6) return;
 
-  ctx.save();
-  ctx.strokeStyle = "rgba(120,160,220,0.13)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
+  c.save();
+  c.strokeStyle = "rgba(120,160,220,0.13)";
+  c.lineWidth = 1;
+  c.beginPath();
 
   const top = Math.max(0, originY);
   const bottom = Math.min(rect.height, originY + PX * scale);
@@ -727,41 +782,101 @@ function drawPlacementGrid(rect) {
   for (let i = 0; i <= BOARD; i += 1) {
     const x = Math.round(originX + i * step) + 0.5;
     if (x < -1 || x > rect.width + 1) continue;
-    ctx.moveTo(x, top);
-    ctx.lineTo(x, bottom);
+    c.moveTo(x, top);
+    c.lineTo(x, bottom);
   }
   for (let i = 0; i <= BOARD; i += 1) {
     const y = Math.round(originY + i * step) + 0.5;
     if (y < -1 || y > rect.height + 1) continue;
-    ctx.moveTo(left, y);
-    ctx.lineTo(right, y);
+    c.moveTo(left, y);
+    c.lineTo(right, y);
   }
 
-  ctx.stroke();
-  ctx.restore();
+  c.stroke();
+  c.restore();
 }
 
-function draw() {
-  const rect = viewport.getBoundingClientRect();
-  const seconds = performance.now() / 1000;
+/**
+ * The world, drawn once and kept.
+ *
+ * Everything from the void to the planets is expensive: a thousand stars, a
+ * halo per planet, three full-board gradients and a 3600px sheet resampled to
+ * the viewport. None of it changes when the pointer moves, so redrawing it for
+ * a hover ring was most of the cost of running at all.
+ *
+ * It lives on its own canvas and is rebuilt only when the view moves, the data
+ * changes, or the ambient animation is due a tick. The interactive layer, which
+ * is what has to keep up with the cursor, then costs one blit plus a few
+ * strokes.
+ */
+let sceneCanvas = null;
+let sceneCtx = null;
+let sceneKey = "";
+let sceneAt = -1;
+
+/**
+ * How often the ambient animation advances.
+ *
+ * The stars twinkle, the auras breathe and the halos shimmer, all on periods
+ * measured in seconds. Sampling those twelve times a second instead of sixty
+ * is invisible and costs a fifth as much.
+ */
+const AMBIENT_FPS = 12;
+
+/** What the world looks like right now, as a string worth comparing. */
+function sceneSignature(rect) {
+  return [
+    Math.round(originX),
+    Math.round(originY),
+    scale.toFixed(4),
+    Math.round(rect.width),
+    Math.round(rect.height),
+    blocks.length,
+    composite === null ? 0 : 1,
+    selection === null ? 0 : 1,
+  ].join("|");
+}
+
+function ensureSceneCanvas(rect) {
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+
+  if (sceneCanvas === null) {
+    sceneCanvas = document.createElement("canvas");
+    sceneCtx = sceneCanvas.getContext("2d");
+  }
+  if (sceneCanvas.width !== width || sceneCanvas.height !== height) {
+    sceneCanvas.width = width;
+    sceneCanvas.height = height;
+    sceneKey = "";
+  }
+  sceneCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function renderScene(rect, seconds) {
+  const c = sceneCtx;
 
   // The void fills the window, then the sky, then the worlds on top of it.
   // Nothing here is clipped to the board: the universe is the background of the
   // whole app, and the board is only where planets are allowed to exist.
-  ctx.fillStyle = "#01020a";
-  ctx.fillRect(0, 0, rect.width, rect.height);
-  drawNebulae();
-  drawStars(rect, seconds);
+  c.fillStyle = "#01020a";
+  c.fillRect(0, 0, rect.width, rect.height);
+  drawNebulae(c);
+  drawStars(c, rect, seconds);
 
-  drawAuras(seconds);
-  drawOrbits(rect, seconds);
-  if (selection !== null) drawPlacementGrid(rect);
-  drawHalos(rect, seconds);
+  drawAuras(c, seconds);
+  drawOrbits(c, rect, seconds);
+  if (selection !== null) drawPlacementGrid(c, rect);
+  drawHalos(c, rect, seconds);
 
   if (composite !== null) {
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(
+    c.imageSmoothingEnabled = true;
+    // High quality resampling of a 3600px sheet is the single most expensive
+    // call here. It is worth it when the view is still and it is not worth it
+    // while somebody is dragging the board around.
+    c.imageSmoothingQuality = panning === null ? "high" : "low";
+    c.drawImage(
       composite,
       Math.round(originX),
       Math.round(originY),
@@ -770,8 +885,27 @@ function draw() {
     );
   }
 
-  drawPlanetDetail(rect);
-  drawClaimedOrbits(seconds);
+  drawPlanetDetail(c, rect);
+  drawClaimedOrbits(c, seconds);
+}
+
+function draw() {
+  const rect = viewport.getBoundingClientRect();
+  const seconds = performance.now() / 1000;
+
+  ensureSceneCanvas(rect);
+
+  const key = sceneSignature(rect);
+  const ambientDue = seconds - sceneAt >= 1 / AMBIENT_FPS;
+  if (dirty || key !== sceneKey || ambientDue) {
+    renderScene(rect, seconds);
+    sceneKey = key;
+    sceneAt = seconds;
+  }
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(sceneCanvas, 0, 0, rect.width, rect.height);
+  ctx.imageSmoothingEnabled = true;
 
   const square = currentSquare();
   if (selection === null && hoverBlock >= 0) {
@@ -809,24 +943,24 @@ function draw() {
  * or a listing waiting on review. They are not in the composite, so without
  * this they would look like empty space and be claimed again.
  */
-function drawClaimedOrbits(seconds) {
+function drawClaimedOrbits(c, seconds) {
   const pulse = 0.5 + 0.5 * Math.sin(seconds * 1.6);
-  ctx.save();
-  ctx.setLineDash([5, 5]);
-  ctx.lineDashOffset = -seconds * 12;
-  ctx.strokeStyle = `rgba(245,180,80,${(0.45 + 0.3 * pulse).toFixed(3)})`;
-  ctx.lineWidth = 1.5;
+  c.save();
+  c.setLineDash([5, 5]);
+  c.lineDashOffset = -seconds * 12;
+  c.strokeStyle = `rgba(245,180,80,${(0.45 + 0.3 * pulse).toFixed(3)})`;
+  c.lineWidth = 1.5;
 
   for (let i = 0; i < held.length; i += 1) {
     if (held[i] === 0 || owner[i] !== -1) continue;
     const x = i % BOARD;
     const { cx, cy, radius } = orbitOf({ x, y: (i - x) / BOARD, size: 1 });
     if (cx < -radius || cy < -radius) continue;
-    ctx.beginPath();
-    ctx.arc(cx, cy, Math.max(1, radius), 0, Math.PI * 2);
-    ctx.stroke();
+    c.beginPath();
+    c.arc(cx, cy, Math.max(1, radius), 0, Math.PI * 2);
+    c.stroke();
   }
-  ctx.restore();
+  c.restore();
 }
 
 /** A shockwave that expands as it fades, so an arrival is felt, not just seen. */

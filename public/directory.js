@@ -147,9 +147,19 @@ export function createDirectory({ panelEl, toggleEl, onFocus, onShare }) {
       go.className = "dir-go";
       go.title = `Find ${entry.name} on the board`;
 
-      const avatar = document.createElement("span");
+      // An img rather than a background, purely so loading="lazy" applies.
+      // Sixty rows meant sixty planet renders the moment the panel opened,
+      // each one a database read and a sharp composite, all competing with the
+      // request that fills the panel in the first place. The browser now asks
+      // for the handful that are actually on screen.
+      const avatar = document.createElement("img");
       avatar.className = "dir-avatar";
-      avatar.style.backgroundImage = `url(/api/planet/${entry.id}?px=64)`;
+      avatar.loading = "lazy";
+      avatar.decoding = "async";
+      avatar.width = 34;
+      avatar.height = 34;
+      avatar.alt = "";
+      avatar.src = `/api/planet/${entry.id}?px=64`;
 
       const text = document.createElement("span");
       text.className = "dir-text";
